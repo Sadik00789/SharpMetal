@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>MiniCoreLib</AssemblyName>
+    <RootNamespace></RootNamespace>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../build/config/Kernel.props" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Kernel</AssemblyName>
+    <RootNamespace>Kernel</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../common/MiniCoreLib/MiniCoreLib.csproj" />
+    <ProjectReference Include="../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

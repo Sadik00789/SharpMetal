@@ -1,0 +1,49 @@
+# =============================================================================
+# Bare-Metal C# Microkernel (.gitignore)
+# =============================================================================
+
+# --- .NET / C# Compilation Artifacts ---
+[Bb]in/
+[Oo]bj/
+*.deps.json
+*.runtimeconfig.json
+*.ilc.rsp
+
+# --- Native Linker & Assembly Outputs ---
+*.obj
+*.o
+*.pdb
+*.exp
+*.lib
+
+# --- Disk Images & Emulation Outputs ---
+build/BOOTX64.EFI
+build/disk.img
+build/nvme.img
+build/esp/
+build/iso/
+*.img
+*.iso
+*.log
+qemu.log
+
+# --- IDE & Editor Specific ---
+.vscode/
+.vs/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+
+# --- Python Intermediates ---
+__pycache__/
+*.py[cod]
+*$py.class
+
+# --- OS Specific ---
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

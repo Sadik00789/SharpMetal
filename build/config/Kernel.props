@@ -1,0 +1,12 @@
+<Project>
+  <Import Project="Common.props" />
+  <PropertyGroup>
+    <IlcSystemModule>MiniCoreLib</IlcSystemModule>
+    <IlcTargetOs>windows</IlcTargetOs>
+    <IlcTargetArch>x64</IlcTargetArch>
+    <EfiSubsystem>/subsystem:efi_application</EfiSubsystem>
+    <EfiEntry>/entry:EfiMain</EfiEntry>
+    <EfiAlignment>/align:4096 /filealign:4096</EfiAlignment>
+    <EfiNodefaultlib>/nodefaultlib</EfiNodefaultlib>
+  </PropertyGroup>
+</Project>

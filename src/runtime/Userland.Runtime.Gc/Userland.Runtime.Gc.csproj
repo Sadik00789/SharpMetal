@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../../build/config/Driver.props" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Userland.Runtime.Gc</AssemblyName>
+    <RootNamespace>Userland.Runtime.Gc</RootNamespace>
+    <NoStdLib>true</NoStdLib>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../common/MiniCoreLib/MiniCoreLib.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+    <ProjectReference Include="../Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../../build/config/Common.props" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Microkernel.Abstractions</AssemblyName>
+    <RootNamespace>Microkernel.Abstractions</RootNamespace>
+    <NoStdLib>true</NoStdLib>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../MiniCoreLib/MiniCoreLib.csproj" />
+  </ItemGroup>
+</Project>
