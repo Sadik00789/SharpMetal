@@ -13,10 +13,11 @@ namespace DisplayServer.Compositor
         [DllImport("*")]
         public static extern void Avx2Fill(void* dst, uint color, ulong pixelCount);
 
-        public static ulong FramebufferVirt = 0x30000000UL;
+        public const ulong FramebufferVirt = 0x30000000UL;
         public static uint Width = 0;
         public static uint Height = 0;
         public static uint Pitch = 0;
+        public static ulong FbSize = 0;
 
         public static void Initialize()
         {
@@ -26,34 +27,37 @@ namespace DisplayServer.Compositor
             Width = bootInfo.GopWidth;
             Height = bootInfo.GopHeight;
             Pitch = bootInfo.GopPixelsPerScanLine > 0 ? bootInfo.GopPixelsPerScanLine : bootInfo.GopWidth;
+            FbSize = bootInfo.GopFbSize;
 
             if (bootInfo.GopPhysBase != 0 && bootInfo.GopFbSize > 0)
             {
                 SyscallWrappers.MapMmio(bootInfo.GopPhysBase, FramebufferVirt, bootInfo.GopFbSize, writeCombining: true);
-                SyscallWrappers.Log("[DISPLAY] GOP Framebuffer mapped via SysMapMmio (Write-Combining).\n");
+                SyscallWrappers.Log("[DISPLAY] GOP Framebuffer mapped via SysMapMmio (Phys != 0).\n");
             }
             else
             {
-                SyscallWrappers.Log("[DISPLAY] GOP Framebuffer mapped via SysMapMmio (Write-Combining).\n");
+                SyscallWrappers.Log("[DISPLAY] ERROR: GopPhysBase or GopFbSize is ZERO!\n");
             }
         }
 
-        public static void RenderTestPattern()
+        public static void ClearFramebuffer(uint color = 0xFF1E1E2E)
         {
-            if (FramebufferVirt != 0 && Pitch > 0)
+            if (FramebufferVirt != 0 && Pitch > 0 && Height > 0)
             {
                 uint* fb = (uint*)FramebufferVirt;
-                uint color = 0x0000_FF00; // Green ARGB
-
-                // Blit / Fill 100x100 test surface with AVX2
-                for (uint y = 0; y < 100; y++)
+                ulong totalPixels = FbSize / 4UL;
+                ulong pitchPixels = (ulong)Pitch * (ulong)Height;
+                if (totalPixels == 0 || totalPixels < pitchPixels)
                 {
-                    uint* row = fb + ((10 + y) * Pitch) + 10;
-                    Avx2Fill(row, color, 100);
+                    totalPixels = pitchPixels;
+                }
+                for (ulong i = 0; i < totalPixels; i++)
+                {
+                    fb[i] = color;
                 }
             }
 
-            SyscallWrappers.Log("[DISPLAY] AVX2 software compositor initialized. Blitted 100x100 surface.\n");
+            SyscallWrappers.Log("[DISPLAY] AVX2 software compositor initialized. Framebuffer cleared.\n");
         }
 
         public static void BlitClientSurface(uint* src, uint srcWidth, uint srcHeight, uint x, uint y, uint w, uint h)
@@ -65,7 +69,10 @@ namespace DisplayServer.Compositor
                 {
                     uint* dstRow = fb + (row * Pitch) + x;
                     uint* srcRow = src + (row * srcWidth) + x;
-                    Avx2Blit(dstRow, srcRow, (ulong)w * 4UL);
+                    for (uint col = 0; col < w && (col + x) < srcWidth; col++)
+                    {
+                        dstRow[col] = srcRow[col];
+                    }
                 }
             }
         }

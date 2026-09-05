@@ -14,7 +14,7 @@ namespace Microkernel.Drawing
         public const uint Gray       = 0xFF808080;
         public const uint LightGray  = 0xFFCCCCCC;
         public const uint DarkBlue   = 0xFF000080;
-        public const uint TerminalBg = 0xFF0D1117; // Modern GitHub Dark theme background
+        public const uint TerminalBg = 0xFF1E1E2E; // Modern dark console slate
         public const uint TerminalFg = 0xFFE6EDF3;
         public const uint Prompt     = 0xFF58A6FF;
         public const uint Success    = 0xFF3FB950;

@@ -222,16 +222,17 @@ namespace Kernel.Boot
                 uint height = GopHeight;
                 uint pitch = GopPixelsPerScanLine > 0 ? GopPixelsPerScanLine : width;
 
-                uint blockW = (width >= 150) ? 100u : (width > 50 ? width - 50 : 0);
-                uint blockH = (height >= 150) ? 100u : (height > 50 ? height - 50 : 0);
-
-                for (uint y = 0; y < blockH; y++)
+                // Full Framebuffer Blanking: wipe all Pitch * Height pixels (up to GopFbSize / 4)
+                ulong totalPixels = GopFbSize / 4UL;
+                ulong pitchPixels = (ulong)pitch * (ulong)height;
+                if (totalPixels == 0 || totalPixels < pitchPixels)
                 {
-                    uint* row = fb + ((50 + y) * pitch);
-                    for (uint x = 0; x < blockW; x++)
-                    {
-                        row[50 + x] = 0x00FF_FFFF; // 32-bit ARGB/XRGB White
-                    }
+                    totalPixels = pitchPixels;
+                }
+
+                for (ulong i = 0; i < totalPixels; i++)
+                {
+                    fb[i] = 0xFF1E1E2E; // Dark console slate
                 }
 
                 EarlySerial.WriteLine("[PASS] Framebuffer accessed strictly via HHDM virtual pointer (PAT WC verified).");

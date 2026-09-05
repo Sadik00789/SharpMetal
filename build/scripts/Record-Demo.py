@@ -15,6 +15,51 @@ import socket
 import tempfile
 import subprocess
 
+def parse_ppm_pixel(ppm_path, px=10, py=10):
+    """
+    Parses the RGB values at (px, py) from a binary Netpbm P6 image.
+    Returns (r, g, b) tuple or None.
+    """
+    try:
+        with open(ppm_path, "rb") as f:
+            header_data = bytearray()
+            tokens = []
+            while len(tokens) < 4:
+                b = f.read(1)
+                if not b:
+                    return None
+                if b == b'#':
+                    while True:
+                        c = f.read(1)
+                        if not c or c in (b'\r', b'\n'):
+                            break
+                    continue
+                if b in b' \t\r\n':
+                    if header_data:
+                        tokens.append(bytes(header_data))
+                        header_data.clear()
+                else:
+                    header_data.append(b[0])
+
+            if len(tokens) < 4 or tokens[0] != b'P6':
+                return None
+
+            width = int(tokens[1])
+            height = int(tokens[2])
+            maxval = int(tokens[3])
+
+            if px >= width or py >= height:
+                return None
+
+            offset = (py * width + px) * 3
+            f.seek(offset, os.SEEK_CUR)
+            rgb = f.read(3)
+            if len(rgb) == 3:
+                return (rgb[0], rgb[1], rgb[2])
+            return None
+    except Exception:
+        return None
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
@@ -70,9 +115,9 @@ def main():
         shutil.rmtree(frame_dir, ignore_errors=True)
         sys.exit(1)
 
-    print("[*] Connected to QEMU monitor. Capturing screendump frames every 150ms...")
+    print("[*] Connected to QEMU monitor. Capturing screendump frames every 80ms...")
 
-    # 4. Polling frame capture loop
+    # 4. Polling frame capture loop (80ms sampling interval)
     frame_idx = 0
     try:
         while proc.poll() is None:
@@ -82,7 +127,7 @@ def main():
                 frame_idx += 1
             except (socket.error, OSError):
                 break
-            time.sleep(0.15)
+            time.sleep(0.08)
     finally:
         try:
             sock.close()
@@ -95,14 +140,15 @@ def main():
                 pass
 
     try:
-        proc.wait(timeout=10)
+        proc.wait(timeout=15)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
 
     print(f"[+] QEMU finished with exit code {proc.returncode}. Captured {frame_idx} raw frames.")
 
-    # 5. Filter valid PPM frames
+    # 5. Pixel-Based UEFI Filter: Inspect raw PPM pixel bytes at (x=10, y=10)
+    # Only start collecting frames once color transitions to dark slate (R=0x1E, G=0x1E, B=0x2E)
     ppm_files = sorted(glob.glob(os.path.join(frame_dir, "frame_*.ppm")))
     valid_frames = [f for f in ppm_files if os.path.isfile(f) and os.path.getsize(f) > 1024]
 
@@ -111,34 +157,52 @@ def main():
         shutil.rmtree(frame_dir, ignore_errors=True)
         sys.exit(1)
 
-    print(f"[+] Verified {len(valid_frames)} valid rendered frames.")
+    print(f"[*] Inspecting {len(valid_frames)} raw screendump frames for UEFI -> OS dark slate transition...")
+    os_frames = []
+    found_os = False
+    for fpath in valid_frames:
+        if not found_os:
+            pixel = parse_ppm_pixel(fpath, px=10, py=10)
+            if pixel:
+                r, g, b = pixel
+                if abs(r - 0x1E) <= 3 and abs(g - 0x1E) <= 3 and abs(b - 0x2E) <= 3:
+                    found_os = True
+                    print(f"[+] Detected OS dark slate background at {os.path.basename(fpath)}: RGB({r}, {g}, {b})")
+        if found_os:
+            os_frames.append(fpath)
 
-    # Re-index valid frames contiguously
+    if not os_frames:
+        print("[-] WARNING: Could not find exact dark slate transition at (10, 10), using all valid frames.", file=sys.stderr)
+        os_frames = valid_frames
+    else:
+        print(f"[+] Screened out {len(valid_frames) - len(os_frames)} UEFI firmware frames. Kept {len(os_frames)} OS terminal frames.")
+
+    # Re-index valid frames contiguously into temp_staged_dir
     temp_staged_dir = tempfile.mkdtemp(prefix="sharpmetal_staged_")
-    for idx, fpath in enumerate(valid_frames):
+    for idx, fpath in enumerate(os_frames):
         dst = os.path.join(temp_staged_dir, f"frame_{idx:04d}.ppm")
         shutil.copy(fpath, dst)
 
-    last_idx = len(valid_frames) - 1
+    last_idx = len(os_frames) - 1
     last_frame = os.path.join(temp_staged_dir, f"frame_{last_idx:04d}.ppm")
 
-    # 6. Mandatory Adjustment 4: Duplicate final frame 30 times (3-second hold at 10 fps)
+    # 6. Duplicate final frame 30 times (3.0-second hold at 10 fps)
     print(f"[*] Holding final terminal frame for 3.0 seconds (duplicating frame 30 times)...")
     for i in range(1, 31):
         dup_dst = os.path.join(temp_staged_dir, f"frame_{last_idx + i:04d}.ppm")
         shutil.copy(last_frame, dup_dst)
 
-    total_frames = len(valid_frames) + 30
+    total_frames = len(os_frames) + 30
     print(f"[+] Staged {total_frames} total frames (including 30-frame final hold).")
 
-    # 7. Compile optimized palette GIF via ffmpeg
-    print(f"[*] Encoding palette-optimized GIF to {output_gif}...")
+    # 7. Compile optimized palette GIF via ffmpeg with Viewport Cropping
+    print(f"[*] Encoding palette-optimized GIF to {output_gif} with viewport crop 660x420...")
     ffmpeg_cmd = [
         ffmpeg_bin,
         "-y",
-        "-framerate", "6",
+        "-framerate", "10",
         "-i", os.path.join(temp_staged_dir, "frame_%04d.ppm"),
-        "-vf", "fps=10,scale=800:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+        "-vf", "crop=660:420:0:0,fps=10,scale=800:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
         output_gif
     ]
 

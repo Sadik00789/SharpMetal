@@ -59,7 +59,7 @@ def main():
             cwd=repo_root,
             capture_output=True,
             text=True,
-            timeout=8
+            timeout=15
         )
         exit_code = proc.returncode
         output = proc.stdout + "\n" + proc.stderr

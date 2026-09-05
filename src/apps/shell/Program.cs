@@ -16,6 +16,24 @@ namespace Shell
         public static TerminalGrid Grid;
         public static Surface ShellSurface;
 
+        public static volatile int s_spinSink;
+
+        public static void DelayPaced(int spinCount = 3000000)
+        {
+            for (int i = 0; i < spinCount; i++)
+            {
+                s_spinSink = i;
+            }
+            SyscallWrappers.Yield();
+        }
+
+        public static void RenderAndCommit(ref DisplayServiceClient displayClient, ulong surfaceId)
+        {
+            Grid.Render(ref ShellSurface, Color32.TerminalFg, Color32.TerminalBg);
+            displayClient.CommitSurface((uint)surfaceId, 0, 0, 640, 400);
+            SyscallWrappers.Yield();
+        }
+
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ShellMain")]
         public static void Main()
         {
@@ -42,9 +60,10 @@ namespace Shell
 
             // 5. Initialize 32-slot command history ring buffer
             TerminalHistory.Initialize();
+            TerminalHistory.Add("cat /HELLO.TXT");
             TerminalHistory.Add("pci");
             TerminalHistory.Add("nvme");
-            TerminalHistory.Add("cat /HELLO.TXT");
+            TerminalHistory.Add("net");
             TerminalHistory.Add("exit");
             SyscallWrappers.Log("[SHELL] History ring buffer initialized (32 slots).\n");
 
@@ -59,32 +78,37 @@ namespace Shell
             Grid.WriteString("=================================================================\n");
             Grid.WriteString("   SharpMetal Microkernel - Interactive Graphic Shell (Phase 10)\n");
             Grid.WriteString("=================================================================\n");
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
 
-            // 8. Execute automated integration commands: 'pci'
-            Grid.WriteString("kernel:> pci\n");
-            ShellEngine.ExecuteCommand("pci", ref Grid);
-
-            // 9. Execute automated integration commands: 'nvme'
-            Grid.WriteString("kernel:> nvme\n");
-            ShellEngine.ExecuteCommand("nvme", ref Grid);
-
-            // 10. Execute automated integration commands: 'cat /HELLO.TXT'
+            // 8. Command 1: 'cat /HELLO.TXT'
             Grid.WriteString("kernel:> cat /HELLO.TXT\n");
             ShellEngine.ExecuteCommand("cat /HELLO.TXT", ref Grid);
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
 
-            // 11. Execute automated integration commands: 'net'
+            // 9. Command 2: 'pci'
+            Grid.WriteString("kernel:> pci\n");
+            ShellEngine.ExecuteCommand("pci", ref Grid);
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
+
+            // 10. Command 3: 'nvme'
+            Grid.WriteString("kernel:> nvme\n");
+            ShellEngine.ExecuteCommand("nvme", ref Grid);
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
+
+            // 11. Command 4: 'net'
             Grid.WriteString("kernel:> net\n");
             ShellEngine.ExecuteCommand("net", ref Grid);
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
 
-            // 12. Render virtual console to surface with alpha-blended font
+            // 12. Command 5: 'exit'
             Grid.WriteString("kernel:> exit\n");
-            Grid.Render(ref ShellSurface, Color32.TerminalFg, Color32.TerminalBg);
-
-            // Commit surface to display_server -> AVX2 Blit -> Token
-            displayClient.CommitSurface((uint)surfaceId, 0, 0, 640, 400);
-
-            // Small yield so display_server processes the commit RPC
-            SyscallWrappers.Yield();
+            RenderAndCommit(ref displayClient, surfaceId);
+            DelayPaced(3000000);
 
             // 13. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
             ShellEngine.ExecuteCommand("exit", ref Grid);
