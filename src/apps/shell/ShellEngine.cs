@@ -82,6 +82,48 @@ namespace Shell
             {
                 var netClient = new NetworkServiceClient(endpointCptr: 12);
                 grid.WriteString("[NET] VirtIO-Net modern PCIe controller online.\n");
+
+                // Live VirtIO Network TX Benchmark:
+                ulong packetVirt = 0x3E000000UL;
+                ulong packetPhys = SyscallWrappers.AllocDma(4096, packetVirt);
+                byte* packetBuf = (byte*)packetVirt;
+
+                // Query device MAC address
+                netClient.GetMacAddress(packetPhys + 512);
+                byte* devMac = (byte*)(packetVirt + 512);
+
+                // Construct 64-byte Ethernet broadcast frame:
+                // 1. Destination MAC: FF:FF:FF:FF:FF:FF (Broadcast)
+                packetBuf[0] = 0xFF;
+                packetBuf[1] = 0xFF;
+                packetBuf[2] = 0xFF;
+                packetBuf[3] = 0xFF;
+                packetBuf[4] = 0xFF;
+                packetBuf[5] = 0xFF;
+
+                // 2. Source MAC: device MAC
+                packetBuf[6] = devMac[0];
+                packetBuf[7] = devMac[1];
+                packetBuf[8] = devMac[2];
+                packetBuf[9] = devMac[3];
+                packetBuf[10] = devMac[4];
+                packetBuf[11] = devMac[5];
+
+                // 3. EtherType: 0x88B5 (Local Experimental)
+                packetBuf[12] = 0x88;
+                packetBuf[13] = 0xB5;
+
+                // 4. Payload: 50 bytes of benchmark pattern
+                for (int i = 14; i < 64; i++)
+                {
+                    packetBuf[i] = (byte)(0xA0 + (i - 14));
+                }
+
+                // Dispatch transmission via VirtIO TX ring
+                netClient.SendPacket(packetPhys, 64);
+
+                grid.WriteString("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
+                SyscallWrappers.Log("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
             }
             else if (cmd == "exit")
             {

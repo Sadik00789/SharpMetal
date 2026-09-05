@@ -13,6 +13,10 @@ A high-performance, capability-based bare-metal operating system microkernel and
 
 The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
 
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="SharpMetal Microkernel Boot and Interactive Shell Demo" width="800" />
+</p>
+
 ---
 
 ## Architecture Overview
@@ -238,7 +242,26 @@ Execute the automated regression harness:
 ```bash
 python3 build/scripts/Test-Harness.py
 ```
-The test harness compiles the system, launches QEMU under an automated 8-second timeout, verifies all 9 sequential milestone tokens over serial output, and validates the `0x10` exit status code via `isa-debug-exit`.
+The test harness compiles the system, launches QEMU under an automated 8-second timeout, verifies all 8 sequential milestone tokens over serial output, and validates the `0x10` exit status code via `isa-debug-exit` (exit code 33).
+
+### 4. Record High-Resolution Demo GIF
+Generate an optimized, palette-quantized boot demonstration GIF:
+```bash
+python3 build/scripts/Record-Demo.py
+```
+This script launches headless QEMU with a UNIX monitor socket, captures screendump PPM frames every 150ms, holds the final terminal screen for 3.0 seconds (30 duplicated frames), and compiles `docs/assets/demo.gif` using `ffmpeg` with lanczos scaling and palette optimization.
+
+### 5. Safe Bare-Metal USB Deployment
+Flash a bootable UEFI drive for physical bare-metal hardware testing:
+```bash
+sudo bash build/scripts/Make-UsbBootable.sh /dev/sdX
+```
+The script features safety protections to prevent host disk loss:
+- **Block Device Validation**: Enforces valid device paths (`-b`).
+- **Removable Drive Check**: Rejects non-removable drives (`RM == 0`) unless explicit `--i-know-what-i-am-doing` is passed.
+- **Mount Point Protection**: Actively detects and refuses to flash root (`/`) or boot (`/boot`) partitions.
+- **Interactive Confirmation**: Prompts with device model, capacity, and requires typing `"YES"`.
+- **Partition Table Settling**: Executes `partprobe "$TARGET" && udevadm settle` after creating a 128 MiB GPT EFI System Partition, checks for both `${TARGET}1` and `${TARGET}p1`, formats with `mkfs.vfat -F 32 -n "SHARPMETAL"`, and stages `BOOTX64.EFI`, `INITRD.IMG`, and `NVME.IMG`.
 
 ---
 
@@ -250,8 +273,10 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 |---|---|---|
 | `help` | Display command list | Shows available shell commands and syntax |
 | `pci` | Enumerate PCIe ECAM devices | Scans buses 0..3 and lists discovered Host Bridges, Display Controllers, and NVMe drives |
-| `nvme` | Execute NVMe benchmark | Performs verified block write and read to LBA 1 with canary validation (`0xA55A1234`) |
-| `caps` | Inspect CSpace capability slots | Lists all 10 root CNode slots and assigned access rights |
+| `nvme` | Execute NVMe benchmark | Performs verified block write and read to LBA 65535 with canary validation (`0xA55A1234`) |
+| `cat <file>` | Read file via VFS | Uses `System.IO.File.ReadAllText` over IPC to read and display FAT32 filesystem contents (e.g. `cat /HELLO.TXT`) |
+| `net` | VirtIO-Net TX benchmark | Builds a 64-byte Ethernet broadcast frame (EtherType `0x88B5`) and transmits via split virtqueue descriptor staging |
+| `caps` | Inspect CSpace capability slots | Lists all root CNode slots and assigned access rights |
 | `ps` | Display process thread table | Displays active thread IDs, execution states, and priority levels |
 | `exit` | Microkernel shutdown | Invokes `sys_exit(0)`, triggers `isa-debug-exit` on port `0xF4`, and exits QEMU |
 
@@ -262,20 +287,29 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 The test harness confirms the complete operational integrity across all 12 microkernel layers:
 
 ```
+=================================================================
+  SharpMetal C# Microkernel: Automated Test Harness (Phase 10)   
+=================================================================
+[OVMF] Verified firmware image at: /home/sadik/.local/usr/share/edk2/ovmf/OVMF_CODE.fd
+
+[STEP 1] Running Make-DiskImage.sh...
 [PASS] Kernel built, drivers packaged, and disk image staged successfully.
+
+[STEP 2] Running QEMU test under OVMF with NVMe storage and VirtIO-Net...
+[QEMU] Exit code: 33
+
 [PASS] QEMU exited with expected code 33 (0x10 via isa-debug-exit).
 [PASS] Found required token: '[NVME] Controller initialized. Admin and I/O queues online.'
-[PASS] Found required token: '[NVME] Verified block write to LBA 1 (Canary: 0xA55A1234).'
-[PASS] Found required token: '[NVME] Verified block read from LBA 1 matches canary.'
-[PASS] Found required token: '[INPUT] PS/2 keyboard controller online.'
-[PASS] Found required token: '[SHELL] Micro-GC runtime active. Surface registered with display_server.'
-[PASS] Found required token: '[SHELL] Executing command: 'pci' -> Discovered 3 hardware devices.'
-[PASS] Found required token: '[SHELL] Executing command: 'nvme' -> Block I/O benchmark passed.'
-[PASS] Found required token: '[DISPLAY] AVX2 compositor blitted terminal shell surface.'
-[PASS] Found required token: '[SUCCESS] Phase 9 fully operational. All 12 layers verified. Exiting QEMU...'
+[PASS] Found required token: '[FAT32] Volume mounted. Found root directory entry: HELLO.TXT'
+[PASS] Found required token: '[VFS] File.ReadAllText('/HELLO.TXT') -> "SharpMetal BareMetal OS"'
+[PASS] Found required token: '[VIRTIO] VirtIO-Net controller online. MAC:'
+[PASS] Found required token: '[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.'
+[PASS] Found required token: '[SHELL] History ring buffer initialized (32 slots).'
+[PASS] Found required token: '[DISPLAY] AVX2 compositor blitted alpha-blended surface.'
+[PASS] Found required token: '[SUCCESS] Phase 10 fully operational. Exiting QEMU...'
 
 =================================================================
-   ALL PHASE 9 VERIFICATION TESTS PASSED SUCCESSFULLY!          
+   ALL PHASE 10 VERIFICATION TESTS PASSED SUCCESSFULLY!         
 =================================================================
 ```
 

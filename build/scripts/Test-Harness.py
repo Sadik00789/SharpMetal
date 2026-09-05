@@ -90,6 +90,7 @@ def main():
         "[FAT32] Volume mounted. Found root directory entry: HELLO.TXT",
         "[VFS] File.ReadAllText('/HELLO.TXT') -> \"SharpMetal BareMetal OS\"",
         "[VIRTIO] VirtIO-Net controller online. MAC:",
+        "[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.",
         "[SHELL] History ring buffer initialized (32 slots).",
         "[DISPLAY] AVX2 compositor blitted alpha-blended surface.",
         "[SUCCESS] Phase 10 fully operational. Exiting QEMU..."

@@ -18,10 +18,16 @@ namespace NetVirtio
         public static byte* IsrCfg = null;
         public static byte* DeviceCfg = null;
 
+        public static uint NotifyOffMultiplier = 0;
+        private static byte* s_txNotifyAddr = null;
+        private static ushort s_lastUsedIdx = 0;
+
         private static ulong s_rxRingPhys = 0;
         private static byte* s_rxRingVirt = null;
         private static ulong s_txRingPhys = 0;
         private static byte* s_txRingVirt = null;
+        private static ulong s_txPacketPhys = 0;
+        private static byte* s_txPacketVirt = null;
 
         private static void PrintHexByte(byte b)
         {
@@ -108,7 +114,10 @@ namespace NetVirtio
                                     switch (cfgType)
                                     {
                                         case 1: CommonCfg = targetPtr; break;
-                                        case 2: NotifyCfg = targetPtr; break;
+                                        case 2:
+                                            NotifyCfg = targetPtr;
+                                            NotifyOffMultiplier = *(uint*)(netConfig + capOffset + 16);
+                                            break;
                                         case 3: IsrCfg = targetPtr; break;
                                         case 4: DeviceCfg = targetPtr; break;
                                     }
@@ -132,12 +141,21 @@ namespace NetVirtio
                 Mac5 = DeviceCfg[5];
             }
 
-            // 3. Allocate Virtqueues via AllocDma (Queue 0: RX, Queue 1: TX)
+            // 3. Allocate Virtqueues via AllocDma (Queue 0: RX, Queue 1: TX, plus TX staging buffer)
             s_rxRingPhys = SyscallWrappers.AllocDma(4096, 0x27000000UL);
             s_rxRingVirt = (byte*)0x27000000UL;
 
             s_txRingPhys = SyscallWrappers.AllocDma(4096, 0x27010000UL);
             s_txRingVirt = (byte*)0x27010000UL;
+
+            s_txPacketPhys = SyscallWrappers.AllocDma(4096, 0x27020000UL);
+            s_txPacketVirt = (byte*)0x27020000UL;
+
+            for (int i = 0; i < 4096; i++)
+            {
+                s_txRingVirt[i] = 0;
+                s_txPacketVirt[i] = 0;
+            }
 
             // 4. Configure Virtqueues in CommonCfg if modern device is found
             if (CommonCfg != null)
@@ -151,17 +169,26 @@ namespace NetVirtio
 
                 // Queue 0: RX
                 *(ushort*)(CommonCfg + 22) = 0; // queue_select
+                *(ushort*)(CommonCfg + 24) = 16; // queue_size
                 *(ulong*)(CommonCfg + 32) = s_rxRingPhys; // queue_desc
                 *(ulong*)(CommonCfg + 40) = s_rxRingPhys + 0x800; // queue_driver
                 *(ulong*)(CommonCfg + 48) = s_rxRingPhys + 0xC00; // queue_device
                 *(ushort*)(CommonCfg + 28) = 1; // queue_enable
 
-                // Queue 1: TX
+                // Queue 1: TX (Adjustment 2: Explicitly write 16 into queue_size)
                 *(ushort*)(CommonCfg + 22) = 1; // queue_select
+                *(ushort*)(CommonCfg + 24) = 16; // queue_size = 16
                 *(ulong*)(CommonCfg + 32) = s_txRingPhys; // queue_desc
                 *(ulong*)(CommonCfg + 40) = s_txRingPhys + 0x800; // queue_driver
                 *(ulong*)(CommonCfg + 48) = s_txRingPhys + 0xC00; // queue_device
                 *(ushort*)(CommonCfg + 28) = 1; // queue_enable
+
+                // Adjustment 1: Calculate txDoorbell = NotifyCfg + (queue_notify_off * notify_off_multiplier)
+                ushort queueNotifyOff = *(ushort*)(CommonCfg + 30);
+                if (NotifyCfg != null)
+                {
+                    s_txNotifyAddr = NotifyCfg + ((ulong)queueNotifyOff * NotifyOffMultiplier);
+                }
 
                 // Status |= DRIVER_OK (4)
                 CommonCfg[20] = (byte)(CommonCfg[20] | 4);
@@ -196,11 +223,71 @@ namespace NetVirtio
 
         public static uint SendPacket(ulong packetPhys, uint length)
         {
-            // Transmit packet via Virtqueue 1
-            if (NotifyCfg != null)
+            if (s_txRingVirt == null || s_txPacketVirt == null) return 0;
+
+            // 1. Map client packet buffer and copy into staging buffer with 12-byte virtio_net_hdr prefix
+            ulong clientVirt = 0x27030000UL;
+            SyscallWrappers.MapMmio(packetPhys, clientVirt, 4096, writeCombining: false);
+
+            // Zero 12-byte virtio_net_hdr
+            for (int i = 0; i < 12; i++)
             {
-                *(ushort*)NotifyCfg = 1; // Doorbell queue 1
+                s_txPacketVirt[i] = 0;
             }
+
+            byte* src = (byte*)clientVirt;
+            byte* dst = s_txPacketVirt + 12;
+            for (uint i = 0; i < length && i < 1500; i++)
+            {
+                dst[i] = src[i];
+            }
+
+            uint totalLen = 12 + length;
+
+            // 2. Write descriptor 0
+            *(ulong*)(s_txRingVirt + 0) = s_txPacketPhys; // addr
+            *(uint*)(s_txRingVirt + 8) = totalLen;        // len
+            *(ushort*)(s_txRingVirt + 12) = 0;            // flags = 0
+            *(ushort*)(s_txRingVirt + 14) = 0;            // next = 0
+
+            // 3. Put index 0 into avail_ring[avail_idx % 16]
+            ushort availIdx = *(ushort*)(s_txRingVirt + 0x802);
+            *(ushort*)(s_txRingVirt + 0x804 + ((availIdx % 16) * 2)) = 0;
+
+            // 4. Memory barrier, then increment avail_idx
+            System.Threading.Thread.MemoryBarrier();
+            *(ushort*)(s_txRingVirt + 0x802) = (ushort)(availIdx + 1);
+
+            // 5. Ring TX doorbell: calculate txDoorbell = NotifyCfg + (queue_notify_off * notify_off_multiplier), write '1' to kick Queue 1
+            if (CommonCfg != null && NotifyCfg != null)
+            {
+                *(ushort*)(CommonCfg + 22) = 1; // queue_select = 1
+                ushort queue_notify_off = *(ushort*)(CommonCfg + 30);
+                byte* txDoorbell = NotifyCfg + ((ulong)queue_notify_off * NotifyOffMultiplier);
+                *(ushort*)txDoorbell = 1;
+            }
+            else if (s_txNotifyAddr != null)
+            {
+                *(ushort*)s_txNotifyAddr = 1;
+            }
+            else if (NotifyCfg != null)
+            {
+                *(ushort*)NotifyCfg = 1;
+            }
+
+            // 6. Poll used_idx with bounded timeout to confirm hardware transmission
+            int timeout = 100000;
+            while (timeout-- > 0)
+            {
+                ushort usedIdx = *(ushort*)(s_txRingVirt + 0xC02);
+                if (usedIdx != s_lastUsedIdx)
+                {
+                    s_lastUsedIdx = usedIdx;
+                    break;
+                }
+                SyscallWrappers.Yield();
+            }
+
             return length;
         }
 

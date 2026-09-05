@@ -72,7 +72,11 @@ namespace Shell
             Grid.WriteString("kernel:> cat /HELLO.TXT\n");
             ShellEngine.ExecuteCommand("cat /HELLO.TXT", ref Grid);
 
-            // 11. Render virtual console to surface with alpha-blended font
+            // 11. Execute automated integration commands: 'net'
+            Grid.WriteString("kernel:> net\n");
+            ShellEngine.ExecuteCommand("net", ref Grid);
+
+            // 12. Render virtual console to surface with alpha-blended font
             Grid.WriteString("kernel:> exit\n");
             Grid.Render(ref ShellSurface, Color32.TerminalFg, Color32.TerminalBg);
 
@@ -82,7 +86,7 @@ namespace Shell
             // Small yield so display_server processes the commit RPC
             SyscallWrappers.Yield();
 
-            // 12. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
+            // 13. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
             ShellEngine.ExecuteCommand("exit", ref Grid);
 
             while (true)
