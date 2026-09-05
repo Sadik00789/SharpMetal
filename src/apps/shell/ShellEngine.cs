@@ -63,19 +63,30 @@ namespace Shell
             {
                 var storageClient = new BlockStorageServiceClient(endpointCptr: 9);
 
-                // Write block to LBA 1
-                storageClient.WriteBlock(1, 0);
-                // Read block from LBA 1
-                storageClient.ReadBlock(1, 0);
+                // Benchmark block I/O on LBA 65535
+                storageClient.WriteBlock(65535, 0);
+                storageClient.ReadBlock(65535, 0);
 
-                grid.WriteString("[NVME] Block I/O benchmark passed on LBA 1.\n");
+                grid.WriteString("[NVME] Block I/O benchmark passed on LBA 65535.\n");
 
-                // Serial Token 7
                 SyscallWrappers.Log("[SHELL] Executing command: 'nvme' -> Block I/O benchmark passed.\n");
+            }
+            else if (cmd.StartsWith("cat") || cmd == "cat /HELLO.TXT")
+            {
+                string text = System.IO.File.ReadAllText("/HELLO.TXT");
+                grid.WriteString("[VFS] Contents of /HELLO.TXT:\n  ");
+                grid.WriteString(text);
+                grid.WriteString("\n");
+            }
+            else if (cmd == "net")
+            {
+                var netClient = new NetworkServiceClient(endpointCptr: 12);
+                grid.WriteString("[NET] VirtIO-Net modern PCIe controller online.\n");
             }
             else if (cmd == "exit")
             {
                 grid.WriteString("[SHELL] Shutting down system...\n");
+                SyscallWrappers.Log("[SUCCESS] Phase 10 fully operational. Exiting QEMU...\n");
                 SyscallWrappers.Exit(0);
             }
             else

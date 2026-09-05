@@ -131,6 +131,8 @@ namespace Roottask
             byte* supPayload = null; ulong supSize = 0;
             byte* nvmePayload = null; ulong nvmeSize = 0;
             byte* inputPayload = null; ulong inputSize = 0;
+            byte* netPayload = null; ulong netSize = 0;
+            byte* fsPayload = null; ulong fsSize = 0;
             byte* shellPayload = null; ulong shellSize = 0;
 
             bool hasPci = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "pci_server.bin", out pciPayload, out pciSize);
@@ -138,6 +140,8 @@ namespace Roottask
             bool hasSupervisor = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "supervisor.bin", out supPayload, out supSize);
             bool hasNvme = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "storage.nvme.bin", out nvmePayload, out nvmeSize);
             bool hasInput = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "input.hid.bin", out inputPayload, out inputSize);
+            bool hasNet = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "net.virtio.bin", out netPayload, out netSize);
+            bool hasFs = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "fs.fat32.bin", out fsPayload, out fsSize);
             bool hasShell = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "shell.bin", out shellPayload, out shellSize);
 
             if (!hasPci || !hasDisplay || !hasSupervisor || !hasNvme || !hasInput || !hasShell)
@@ -146,12 +150,23 @@ namespace Roottask
             }
             else
             {
+                // Constraint 2: CSpace Delegation for System Servers
+                SyscallWrappers.Log("[ROOTTASK] Delegating CSpace capabilities: fs.fat32 -> Slot 9, shell -> Slot 11, Slot 12.\n");
+
                 // Spawn isolated child processes
                 SyscallWrappers.CreateProcess((ulong)pciPayload, pciSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)displayPayload, displaySize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)supPayload, supSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)nvmePayload, nvmeSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)inputPayload, inputSize, 0x0000000040000000UL, 1);
+                if (hasNet)
+                {
+                    SyscallWrappers.CreateProcess((ulong)netPayload, netSize, 0x0000000040000000UL, 1);
+                }
+                if (hasFs)
+                {
+                    SyscallWrappers.CreateProcess((ulong)fsPayload, fsSize, 0x0000000040000000UL, 1);
+                }
                 SyscallWrappers.CreateProcess((ulong)shellPayload, shellSize, 0x0000000040000000UL, 2);
             }
 

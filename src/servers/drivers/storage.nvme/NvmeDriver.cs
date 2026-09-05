@@ -195,7 +195,7 @@ namespace StorageNvme
             Iosq[0].CommandId = 10;
             Iosq[0].Nsid = 1;
             Iosq[0].Prp1 = IoBufferPhys;
-            Iosq[0].Cdw10 = 1; // LBA 1
+            Iosq[0].Cdw10 = 65535; // LBA 65535 (Constraint 3: Avoid FSInfo corruption)
             Iosq[0].Cdw11 = 0;
             Iosq[0].Cdw12 = 0; // 1 block (0-based)
             *(uint*)(Bar0 + sq1Db) = 1;
@@ -208,16 +208,16 @@ namespace StorageNvme
             *(uint*)(Bar0 + cq1Db) = 1;
 
             // Serial Token 2
-            SyscallWrappers.Log("[NVME] Verified block write to LBA 1 (Canary: 0xA55A1234).\n");
+            SyscallWrappers.Log("[NVME] Verified block write to LBA 65535 (Canary: 0xA55A1234).\n");
 
-            // 9. Canary Read from LBA 1
+            // 9. Canary Read from LBA 65535
             ZeroMemory(IoBuffer, 512);
 
             Iosq[1].Opcode = NvmeOpcodes.Read;
             Iosq[1].CommandId = 11;
             Iosq[1].Nsid = 1;
             Iosq[1].Prp1 = IoBufferPhys;
-            Iosq[1].Cdw10 = 1; // LBA 1
+            Iosq[1].Cdw10 = 65535; // LBA 65535
             Iosq[1].Cdw11 = 0;
             Iosq[1].Cdw12 = 0; // 1 block
             *(uint*)(Bar0 + sq1Db) = 2;
@@ -233,7 +233,7 @@ namespace StorageNvme
             if (readCanary == 0xA55A1234)
             {
                 // Serial Token 3
-                SyscallWrappers.Log("[NVME] Verified block read from LBA 1 matches canary.\n");
+                SyscallWrappers.Log("[NVME] Verified block read from LBA 65535 matches canary.\n");
             }
             else
             {
@@ -241,18 +241,21 @@ namespace StorageNvme
             }
         }
 
+        private const uint QueueSize = 64; // Strictly power of 2
+        private const uint QueueMask = QueueSize - 1;
+
         public static ulong ReadBlock(ulong lba, ulong shmPhysOrVirt)
         {
             uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
             uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
 
-            uint sqIdx = s_iosqTail % 64;
-            uint cqIdx = s_iocqHead % 64;
+            uint sqIdx = s_iosqTail & QueueMask;
+            uint cqIdx = s_iocqHead & QueueMask;
 
             Iosq[sqIdx].Opcode = NvmeOpcodes.Read;
             Iosq[sqIdx].CommandId = s_cmdId++;
             Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Prp1 = IoBufferPhys;
+            Iosq[sqIdx].Prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
             Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
             Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
             Iosq[sqIdx].Cdw12 = 0; // 1 block
@@ -267,7 +270,7 @@ namespace StorageNvme
             }
 
             s_iocqHead++;
-            if ((s_iocqHead % 64) == 0) s_iocqPhase ^= 1;
+            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
             *(uint*)(Bar0 + cq1Db) = s_iocqHead;
 
             return 0;
@@ -278,13 +281,13 @@ namespace StorageNvme
             uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
             uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
 
-            uint sqIdx = s_iosqTail % 64;
-            uint cqIdx = s_iocqHead % 64;
+            uint sqIdx = s_iosqTail & QueueMask;
+            uint cqIdx = s_iocqHead & QueueMask;
 
             Iosq[sqIdx].Opcode = NvmeOpcodes.Write;
             Iosq[sqIdx].CommandId = s_cmdId++;
             Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Prp1 = IoBufferPhys;
+            Iosq[sqIdx].Prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
             Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
             Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
             Iosq[sqIdx].Cdw12 = 0; // 1 block
@@ -299,7 +302,7 @@ namespace StorageNvme
             }
 
             s_iocqHead++;
-            if ((s_iocqHead % 64) == 0) s_iocqPhase ^= 1;
+            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
             *(uint*)(Bar0 + cq1Db) = s_iocqHead;
 
             return 0;

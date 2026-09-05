@@ -35,9 +35,13 @@ namespace DisplayServer
         {
             if (s_surfaceMapped)
             {
-                SoftwareBlitterAvx2.BlitClientSurface((uint*)s_clientSurfaceVirt, s_surfaceWidth, s_surfaceHeight, x, y, w, h);
+                uint cx = x, cy = y, cw = w, ch = h;
+                if (DirtyRegionTracker.Clip(ref cx, ref cy, ref cw, ref ch, SoftwareBlitterAvx2.Width, SoftwareBlitterAvx2.Height))
+                {
+                    SoftwareBlitterAvx2.BlitClientSurface((uint*)s_clientSurfaceVirt, s_surfaceWidth, s_surfaceHeight, cx, cy, cw, ch);
+                }
             }
-            SyscallWrappers.Log("[DISPLAY] AVX2 compositor blitted terminal shell surface.\n");
+            SyscallWrappers.Log("[DISPLAY] AVX2 compositor blitted alpha-blended surface.\n");
             return 0;
         }
     }

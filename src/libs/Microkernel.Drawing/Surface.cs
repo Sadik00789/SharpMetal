@@ -42,6 +42,28 @@ namespace Microkernel.Drawing
             }
         }
 
+        public static uint BlendPixel(uint srcColor, uint dstColor, byte alpha)
+        {
+            if (alpha == 0) return dstColor;
+            if (alpha == 255) return srcColor;
+
+            uint invAlpha = (uint)(255 - alpha);
+
+            uint srcR = (srcColor >> 16) & 0xFF;
+            uint srcG = (srcColor >> 8) & 0xFF;
+            uint srcB = srcColor & 0xFF;
+
+            uint dstR = (dstColor >> 16) & 0xFF;
+            uint dstG = (dstColor >> 8) & 0xFF;
+            uint dstB = dstColor & 0xFF;
+
+            uint outR = ((srcR * alpha) + (dstR * invAlpha)) / 255;
+            uint outG = ((srcG * alpha) + (dstG * invAlpha)) / 255;
+            uint outB = ((srcB * alpha) + (dstB * invAlpha)) / 255;
+
+            return 0xFF000000 | (outR << 16) | (outG << 8) | outB;
+        }
+
         public void DrawChar(int x, int y, char c, uint fgColor, uint bgColor)
         {
             if (Pixels == null) return;
@@ -62,7 +84,16 @@ namespace Microkernel.Drawing
                     if (px < 0 || px >= Width) continue;
 
                     bool set = ((bits >> (7 - col)) & 1) != 0;
-                    Pixels[rowOffset + px] = set ? fgColor : bgColor;
+                    byte alpha = set ? (byte)255 : (byte)0;
+
+                    if (alpha > 0)
+                    {
+                        Pixels[rowOffset + px] = BlendPixel(fgColor, Pixels[rowOffset + px], alpha);
+                    }
+                    else if (bgColor != 0)
+                    {
+                        Pixels[rowOffset + px] = bgColor;
+                    }
                 }
             }
         }

@@ -43,6 +43,15 @@ namespace Kernel.Arch.x86_64.Hardware
         public static extern void EnableInterrupts();
 
         [DllImport("*")]
+        public static extern void Invlpg(ulong virtAddr);
+
+        [DllImport("*")]
+        public static extern ulong ReadRflags();
+
+        [DllImport("*")]
+        public static extern void RestoreRflags(ulong rflags);
+
+        [DllImport("*")]
         public static extern ulong GetRsp();
 
         [DllImport("*")]

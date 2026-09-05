@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Microkernel.Vfs</AssemblyName>
+    <RootNamespace>Microkernel.Vfs</RootNamespace>
+    <NoStdLib>true</NoStdLib>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../MiniCoreLib/MiniCoreLib.csproj" />
+    <ProjectReference Include="../Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+    <ProjectReference Include="../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+    <ProjectReference Include="../../compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj"
+                      OutputItemType="Analyzer"
+                      ReferenceOutputAssembly="false" />
+  </ItemGroup>
+</Project>

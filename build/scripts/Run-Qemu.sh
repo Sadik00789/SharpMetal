@@ -7,33 +7,45 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PATH="${HOME}/.dotnet:${HOME}/.local/bin:${PATH}"
 export LD_LIBRARY_PATH="${HOME}/.local/usr/lib64:${LD_LIBRARY_PATH:-}"
 
-# Locate OVMF firmware paths
-OVMF_DIR=""
-for candidate in \
-    "/usr/share/edk2/ovmf" \
-    "${HOME}/.local/usr/share/edk2/ovmf" \
-    "/usr/share/OVMF" \
-    "/usr/share/edk2-ovmf"; do
-    if [[ -d "${candidate}" && -f "${candidate}/OVMF_CODE.fd" ]]; then
-        OVMF_DIR="${candidate}"
+# Locate OVMF firmware paths (Multi-distro probe)
+OVMF_CODE=""
+OVMF_VARS=""
+
+candidates=(
+    "/usr/share/OVMF/OVMF_CODE.fd:/usr/share/OVMF/OVMF_VARS.fd"
+    "/usr/share/ovmf/OVMF.fd:"
+    "/usr/share/edk2/ovmf/OVMF_CODE.fd:/usr/share/edk2/ovmf/OVMF_VARS.fd"
+    "${HOME}/.local/usr/share/edk2/ovmf/OVMF_CODE.fd:${HOME}/.local/usr/share/edk2/ovmf/OVMF_VARS.fd"
+    "/usr/share/edk2-ovmf/OVMF_CODE.fd:/usr/share/edk2-ovmf/OVMF_VARS.fd"
+)
+
+for pair in "${candidates[@]}"; do
+    code="${pair%%:*}"
+    vars="${pair##*:}"
+    if [[ -f "${code}" ]]; then
+        OVMF_CODE="${code}"
+        OVMF_VARS="${vars}"
         break
     fi
 done
 
-if [[ -z "${OVMF_DIR}" ]]; then
-    echo "[ERROR] OVMF firmware not found in /usr/share/edk2/ovmf or fallback locations." >&2
+if [[ -z "${OVMF_CODE}" ]]; then
+    echo "[ERROR] Could not find valid OVMF firmware image." >&2
     exit 1
 fi
 
-echo "[QEMU] Using OVMF firmware from ${OVMF_DIR}"
+echo "[QEMU] Using OVMF firmware: CODE=${OVMF_CODE}, VARS=${OVMF_VARS:-none}"
 
-OVMF_CODE="${OVMF_DIR}/OVMF_CODE.fd"
-OVMF_VARS="${OVMF_DIR}/OVMF_VARS.fd"
-
-# Copy VARS to a temporary file so firmware nvram writes don't corrupt the master
-VARS_TMP=$(mktemp /tmp/ovmf_vars.XXXXXX.fd)
-cp "${OVMF_VARS}" "${VARS_TMP}"
-trap 'rm -f "${VARS_TMP}"' EXIT
+OVMF_FLASH_ARGS=()
+if [[ -n "${OVMF_VARS}" && -f "${OVMF_VARS}" ]]; then
+    VARS_TMP=$(mktemp /tmp/ovmf_vars.XXXXXX.fd)
+    cp "${OVMF_VARS}" "${VARS_TMP}"
+    trap 'rm -f "${VARS_TMP}"' EXIT
+    OVMF_FLASH_ARGS+=("-drive" "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}")
+    OVMF_FLASH_ARGS+=("-drive" "if=pflash,format=raw,file=${VARS_TMP}")
+else
+    OVMF_FLASH_ARGS+=("-bios" "${OVMF_CODE}")
+fi
 
 QEMU_BIN="qemu-system-x86_64"
 if ! command -v "${QEMU_BIN}" >/dev/null 2>&1; then
@@ -68,14 +80,19 @@ if [[ "$*" != *"-device nvme"* ]]; then
     NVME_ARGS+=("-drive" "file=${NVME_IMG},format=raw,if=none,id=nvm" "-device" "nvme,serial=nvme01,drive=nvm")
 fi
 
+NET_ARGS=()
+if [[ "$*" != *"-device virtio-net"* ]]; then
+    NET_ARGS+=("-netdev" "user,id=net0" "-device" "virtio-net-pci,netdev=net0")
+fi
+
 # Run QEMU with serial output, debugcon, GDB stub option, and isa-debug-exit
 "${QEMU_BIN}" \
     -machine q35 \
     -cpu max \
-    -drive "if=pflash,format=raw,readonly=on,file=${OVMF_CODE}" \
-    -drive "if=pflash,format=raw,file=${VARS_TMP}" \
+    "${OVMF_FLASH_ARGS[@]}" \
     "${QEMU_DRIVE_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
+    "${NET_ARGS[@]}" \
     -m 512M \
     -no-reboot \
     -display none \

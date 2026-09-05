@@ -1,9 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <Import Project="../../../build/config/UserlandApp.props" />
+  <Import Project="../../../build/config/Driver.props" />
   <PropertyGroup>
     <OutputType>Library</OutputType>
-    <AssemblyName>shell</AssemblyName>
-    <RootNamespace>Shell</RootNamespace>
+    <AssemblyName>fs.fat32</AssemblyName>
+    <RootNamespace>FsFat32</RootNamespace>
     <NoStdLib>true</NoStdLib>
     <TargetFramework>net9.0</TargetFramework>
   </PropertyGroup>
@@ -12,9 +12,6 @@
     <ProjectReference Include="../../common/MiniCoreLib/MiniCoreLib.csproj" />
     <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
     <ProjectReference Include="../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
-    <ProjectReference Include="../../runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" />
-    <ProjectReference Include="../../libs/Microkernel.Drawing/Microkernel.Drawing.csproj" />
-    <ProjectReference Include="../../common/Microkernel.Vfs/Microkernel.Vfs.csproj" />
     <ProjectReference Include="../../compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />

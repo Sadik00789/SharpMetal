@@ -480,8 +480,14 @@ namespace Kernel.Boot
                 // Slot 10: Input Service Endpoint Capability
                 Endpoint* inputEp = Endpoint.Create();
                 rootCNode->Set(10, inputEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xAAAA);
+                // Slot 11: FAT32 Filesystem Service Endpoint Capability
+                Endpoint* fsEp = Endpoint.Create();
+                rootCNode->Set(11, fsEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xBBBB);
+                // Slot 12: VirtIO-Net Service Endpoint Capability
+                Endpoint* netEp = Endpoint.Create();
+                rootCNode->Set(12, netEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xCCCC);
 
-                EarlySerial.WriteLine("[ROOTTASK] Initial root CNode initialized with 8 core capabilities.");
+                EarlySerial.WriteLine("[ROOTTASK] Initial root CNode initialized with 10 core capabilities.");
 
                 // 4. Synthesize roottask thread
                 ThreadControlBlock* roottaskTcb = Scheduler.CreateThread(null, 0, enqueue: false);

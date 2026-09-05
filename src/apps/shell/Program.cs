@@ -40,34 +40,49 @@ namespace Shell
             var displayClient = new DisplayServiceClient(endpointCptr: 7);
             ulong surfaceId = displayClient.RegisterSurface(640, 400, surfacePhys);
 
-            // Serial Token 5
-            SyscallWrappers.Log("[SHELL] Micro-GC runtime active. Surface registered with display_server.\n");
+            // 5. Initialize 32-slot command history ring buffer
+            TerminalHistory.Initialize();
+            TerminalHistory.Add("pci");
+            TerminalHistory.Add("nvme");
+            TerminalHistory.Add("cat /HELLO.TXT");
+            TerminalHistory.Add("exit");
+            SyscallWrappers.Log("[SHELL] History ring buffer initialized (32 slots).\n");
 
-            // 5. Initialize terminal text grid and banner
+            // 6. Test VFS File.ReadAllText
+            string helloText = System.IO.File.ReadAllText("/HELLO.TXT");
+            SyscallWrappers.Log("[VFS] File.ReadAllText('/HELLO.TXT') -> \"");
+            SyscallWrappers.Log(helloText);
+            SyscallWrappers.Log("\"\n");
+
+            // 7. Initialize terminal text grid and banner
             Grid.Initialize();
             Grid.WriteString("=================================================================\n");
-            Grid.WriteString("   Baremetal C# Microkernel - Interactive Graphic Shell (Phase 9)\n");
+            Grid.WriteString("   SharpMetal Microkernel - Interactive Graphic Shell (Phase 10)\n");
             Grid.WriteString("=================================================================\n");
 
-            // 6. Execute automated integration commands: 'pci'
+            // 8. Execute automated integration commands: 'pci'
             Grid.WriteString("kernel:> pci\n");
             ShellEngine.ExecuteCommand("pci", ref Grid);
 
-            // 7. Execute automated integration commands: 'nvme'
+            // 9. Execute automated integration commands: 'nvme'
             Grid.WriteString("kernel:> nvme\n");
             ShellEngine.ExecuteCommand("nvme", ref Grid);
 
-            // 8. Render virtual console to surface and commit to display_server via AVX2
+            // 10. Execute automated integration commands: 'cat /HELLO.TXT'
+            Grid.WriteString("kernel:> cat /HELLO.TXT\n");
+            ShellEngine.ExecuteCommand("cat /HELLO.TXT", ref Grid);
+
+            // 11. Render virtual console to surface with alpha-blended font
             Grid.WriteString("kernel:> exit\n");
             Grid.Render(ref ShellSurface, Color32.TerminalFg, Color32.TerminalBg);
 
-            // Commit surface to display_server -> AVX2 Blit -> Token 8
+            // Commit surface to display_server -> AVX2 Blit -> Token
             displayClient.CommitSurface((uint)surfaceId, 0, 0, 640, 400);
 
             // Small yield so display_server processes the commit RPC
             SyscallWrappers.Yield();
 
-            // 9. Execute 'exit' command -> SysExit(0) -> Token 9 -> QEMU exit 33
+            // 12. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
             ShellEngine.ExecuteCommand("exit", ref Grid);
 
             while (true)

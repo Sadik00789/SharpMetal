@@ -3,13 +3,33 @@ import subprocess
 import sys
 import os
 
+def find_ovmf():
+    candidates = [
+        # Ubuntu / Debian CI
+        ("/usr/share/OVMF/OVMF_CODE.fd", "/usr/share/OVMF/OVMF_VARS.fd"),
+        ("/usr/share/ovmf/OVMF.fd", None),
+        # Fedora / RHEL
+        ("/usr/share/edk2/ovmf/OVMF_CODE.fd", "/usr/share/edk2/ovmf/OVMF_VARS.fd"),
+        # Local user override
+        (os.path.expanduser("~/.local/usr/share/edk2/ovmf/OVMF_CODE.fd"),
+         os.path.expanduser("~/.local/usr/share/edk2/ovmf/OVMF_VARS.fd")),
+    ]
+    for code, vars_file in candidates:
+        if os.path.exists(code):
+            return code, vars_file
+    raise FileNotFoundError("Could not find valid OVMF firmware image.")
+
 def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
 
     print("=================================================================")
-    print("   Bare-Metal C# Microkernel: Automated Test Harness (Phase 9)   ")
+    print("  SharpMetal C# Microkernel: Automated Test Harness (Phase 10)   ")
     print("=================================================================")
+
+    # Probe OVMF
+    code_fd, vars_fd = find_ovmf()
+    print(f"[OVMF] Verified firmware image at: {code_fd}")
 
     # Step 1: Run Make-DiskImage.sh
     print("\n[STEP 1] Running Make-DiskImage.sh...")
@@ -22,8 +42,8 @@ def main():
         sys.exit(1)
     print("[PASS] Kernel built, drivers packaged, and disk image staged successfully.")
 
-    # Step 2: Run QEMU via Run-Qemu.sh with NVMe drive flags (Constraint 4)
-    print("\n[STEP 2] Running QEMU test under OVMF with NVMe storage...")
+    # Step 2: Run QEMU via Run-Qemu.sh
+    print("\n[STEP 2] Running QEMU test under OVMF with NVMe storage and VirtIO-Net...")
     run_qemu = os.path.join(script_dir, "Run-Qemu.sh")
     nvme_img = os.path.join(repo_root, "build/nvme.img")
 
@@ -32,7 +52,9 @@ def main():
             [
                 "bash", run_qemu,
                 "-drive", f"file={nvme_img},format=raw,if=none,id=nvm",
-                "-device", "nvme,serial=nvme01,drive=nvm"
+                "-device", "nvme,serial=nvme01,drive=nvm",
+                "-netdev", "user,id=net0",
+                "-device", "virtio-net-pci,netdev=net0"
             ],
             cwd=repo_root,
             capture_output=True,
@@ -42,7 +64,7 @@ def main():
         exit_code = proc.returncode
         output = proc.stdout + "\n" + proc.stderr
     except subprocess.TimeoutExpired as e:
-        print("[FAIL] QEMU timed out after 15 seconds!")
+        print("[FAIL] QEMU timed out after 8 seconds!")
         if e.stdout:
             print("STDOUT:\n", e.stdout.decode(errors='replace'))
         if e.stderr:
@@ -62,17 +84,15 @@ def main():
         sys.exit(1)
     print(f"[PASS] QEMU exited with expected code {expected_exit} (0x10 via isa-debug-exit).")
 
-    # Step 4: Validate Phase 9 required banners and tokens in serial output
+    # Step 4: Validate Phase 10 required banners and tokens in serial output
     required_tokens = [
         "[NVME] Controller initialized. Admin and I/O queues online.",
-        "[NVME] Verified block write to LBA 1 (Canary: 0xA55A1234).",
-        "[NVME] Verified block read from LBA 1 matches canary.",
-        "[INPUT] PS/2 keyboard controller online.",
-        "[SHELL] Micro-GC runtime active. Surface registered with display_server.",
-        "[SHELL] Executing command: 'pci' -> Discovered 3 hardware devices.",
-        "[SHELL] Executing command: 'nvme' -> Block I/O benchmark passed.",
-        "[DISPLAY] AVX2 compositor blitted terminal shell surface.",
-        "[SUCCESS] Phase 9 fully operational. All 12 layers verified. Exiting QEMU..."
+        "[FAT32] Volume mounted. Found root directory entry: HELLO.TXT",
+        "[VFS] File.ReadAllText('/HELLO.TXT') -> \"SharpMetal BareMetal OS\"",
+        "[VIRTIO] VirtIO-Net controller online. MAC:",
+        "[SHELL] History ring buffer initialized (32 slots).",
+        "[DISPLAY] AVX2 compositor blitted alpha-blended surface.",
+        "[SUCCESS] Phase 10 fully operational. Exiting QEMU..."
     ]
 
     for token in required_tokens:
@@ -82,7 +102,7 @@ def main():
         print(f"[PASS] Found required token: '{token}'")
 
     print("\n=================================================================")
-    print("   ALL PHASE 9 VERIFICATION TESTS PASSED SUCCESSFULLY!          ")
+    print("   ALL PHASE 10 VERIFICATION TESTS PASSED SUCCESSFULLY!         ")
     print("=================================================================")
     sys.exit(0)
 

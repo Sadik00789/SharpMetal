@@ -174,6 +174,28 @@ XSetBv:
     xsetbv
     ret
 
+global DisableInterrupts
+global EnableInterrupts
+global Invlpg
+global ReadRflags
+global RestoreRflags
+global GetRsp
+global GetRip
+
+Invlpg:
+    invlpg [rcx]
+    ret
+
+ReadRflags:
+    pushfq
+    pop rax
+    ret
+
+RestoreRflags:
+    push rcx
+    popfq
+    ret
+
 DisableInterrupts:
     cli
     ret

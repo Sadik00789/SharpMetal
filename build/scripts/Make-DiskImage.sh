@@ -43,19 +43,59 @@ dotnet build "${REPO_ROOT}/src/servers/drivers/storage.nvme/storage.nvme.csproj"
 echo "[BUILD] Compiling input.hid IL..."
 dotnet build "${REPO_ROOT}/src/servers/drivers/input.hid/input.hid.csproj" -c Release
 
+echo "[BUILD] Compiling net.virtio IL..."
+dotnet build "${REPO_ROOT}/src/servers/drivers/net.virtio/net.virtio.csproj" -c Release
+
+echo "[BUILD] Compiling fs.fat32 IL..."
+dotnet build "${REPO_ROOT}/src/servers/fs.fat32/fs.fat32.csproj" -c Release
+
+echo "[BUILD] Compiling Microkernel.Vfs IL..."
+dotnet build "${REPO_ROOT}/src/common/Microkernel.Vfs/Microkernel.Vfs.csproj" -c Release
+
 echo "[BUILD] Compiling shell IL..."
 dotnet build "${REPO_ROOT}/src/apps/shell/shell.csproj" -c Release
 
 echo "[BUILD] Compiling Kernel IL..."
 dotnet build "${REPO_ROOT}/src/kernel/Kernel.csproj" -c Release
 
-ILC_BIN="${HOME}/.nuget/packages/runtime.linux-x64.microsoft.dotnet.ilcompiler/9.0.19/tools/ilc"
-if [[ ! -f "${ILC_BIN}" ]]; then
-    ILC_BIN=$(find "${HOME}/.nuget/packages" -name "ilc" -type f -perm -111 2>/dev/null | head -n 1)
+echo "=== [1/6] Locating Native AOT Compiler (ilc) ==="
+
+# 1. Check if ILC is already set in environment and executable
+if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
+    # Search local NuGet package cache
+    ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | head -n 1 || true)
 fi
 
+# 2. If not found, explicitly restore the compiler package into the NuGet cache
+if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
+    echo "[*] ilc not found in cache. Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..."
+    TMP_RESTORE="/tmp/ilc_restore_$$"
+    mkdir -p "$TMP_RESTORE"
+    dotnet new console -o "$TMP_RESTORE" --no-restore >/dev/null 2>&1 || true
+    dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
+    rm -rf "$TMP_RESTORE"
+    ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | head -n 1 || true)
+fi
+
+if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
+    ILC=$(find "$HOME/.nuget/packages" -name "ilc" -type f 2>/dev/null | head -n 1 || true)
+    if [ -n "${ILC:-}" ]; then
+        chmod +x "$ILC" 2>/dev/null || true
+    fi
+fi
+
+if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
+    echo "[-] Error: Failed to locate executable 'ilc' Native AOT compiler binary." >&2
+    exit 1
+fi
+
+echo "[AOT] Found Native AOT Compiler: $ILC"
+export ILC
+ILC_BIN="$ILC"
+export ILC_BIN
+
 echo "[AOT] Compiling roottask via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -91,7 +131,7 @@ cp "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.exe" \
    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.bin"
 
 echo "[AOT] Compiling pci_server via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -123,7 +163,7 @@ cp "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.exe" \
    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.bin"
 
 echo "[AOT] Compiling display_server via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -157,7 +197,7 @@ cp "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_serve
    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.bin"
 
 echo "[AOT] Compiling supervisor via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -189,7 +229,7 @@ cp "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.exe" \
    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.bin"
 
 echo "[AOT] Compiling storage.nvme via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -221,7 +261,7 @@ cp "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage
    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.bin"
 
 echo "[AOT] Compiling input.hid via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -254,14 +294,79 @@ lld-link \
 cp "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.exe" \
    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.bin"
 
+echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
+"$ILC" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.obj" \
+    --targetos windows \
+    --targetarch x64 \
+    --systemmodule MiniCoreLib \
+    --nativelib \
+    --directpinvoke:Syscall
+
+echo "[NASM] Assembling VirtioNetEntry.asm..."
+nasm -f win64 "${REPO_ROOT}/src/servers/drivers/net.virtio/VirtioNetEntry.asm" \
+    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/VirtioNetEntry.obj"
+
+echo "[LINK] Linking net.virtio.exe via lld-link..."
+lld-link \
+    /align:4096 \
+    /filealign:4096 \
+    /nodefaultlib \
+    /subsystem:console \
+    /entry:VirtioNetEntry \
+    /base:0x40000000 \
+    /out:"${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.exe" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/VirtioNetEntry.obj" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.obj"
+
+cp "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.exe" \
+   "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.bin"
+
+echo "[AOT] Compiling fs.fat32 via Native AOT (ilc)..."
+"$ILC" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.obj" \
+    --targetos windows \
+    --targetarch x64 \
+    --systemmodule MiniCoreLib \
+    --nativelib \
+    --directpinvoke:Syscall
+
+echo "[NASM] Assembling Fat32Entry.asm..."
+nasm -f win64 "${REPO_ROOT}/src/servers/fs.fat32/Fat32Entry.asm" \
+    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/Fat32Entry.obj"
+
+echo "[LINK] Linking fs.fat32.exe via lld-link..."
+lld-link \
+    /align:4096 \
+    /filealign:4096 \
+    /nodefaultlib \
+    /subsystem:console \
+    /entry:Fat32Entry \
+    /base:0x40000000 \
+    /out:"${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.exe" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/Fat32Entry.obj" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.obj"
+
+cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.exe" \
+   "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.bin"
+
 echo "[AOT] Compiling shell via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/net9.0/Userland.Runtime.Gc.dll" \
     -r "${REPO_ROOT}/src/libs/Microkernel.Drawing/bin/x64/Release/net9.0/Microkernel.Drawing.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/net9.0/Microkernel.Vfs.dll" \
     -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.obj" \
     --targetos windows \
     --targetarch x64 \
@@ -290,7 +395,7 @@ cp "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.exe" \
    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.bin"
 
 echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
-"${ILC_BIN}" \
+"$ILC" \
     "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Kernel.dll" \
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
@@ -332,7 +437,10 @@ echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
     --directpinvoke:EnterUserMode \
     --directpinvoke:SetSyscallKernelRsp \
     --directpinvoke:GetUserThreadTrampoline \
-    --directpinvoke:XSetBv
+    --directpinvoke:XSetBv \
+    --directpinvoke:Invlpg \
+    --directpinvoke:ReadRflags \
+    --directpinvoke:RestoreRflags
 
 echo "[NASM] Assembling Entry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/Entry.asm" \
@@ -389,14 +497,20 @@ python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
     supervisor.bin="${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.bin" \
     storage.nvme.bin="${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.bin" \
     input.hid.bin="${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.bin" \
+    net.virtio.bin="${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.bin" \
+    fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.bin" \
     shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.bin"
 
-# Constraint 4: Create 32MB raw NVMe image
+# Constraint 1: Rootless FAT32 Disk Staging
 NVME_IMG="${REPO_ROOT}/build/nvme.img"
-if [[ ! -f "${NVME_IMG}" ]]; then
-    echo "[DISK] Creating 32MB raw NVMe disk image at ${NVME_IMG}..."
-    dd if=/dev/zero of="${NVME_IMG}" bs=1M count=32 status=none
-fi
+echo "[DISK] Creating 32MB rootless FAT32 NVMe disk image at ${NVME_IMG}..."
+rm -f "${NVME_IMG}"
+dd if=/dev/zero of="${NVME_IMG}" bs=1M count=32 status=none
+mkfs.fat -F 32 -s 1 "${NVME_IMG}"
+TMP_HELLO="/tmp/HELLO_$$.TXT"
+echo -n "SharpMetal BareMetal OS" > "${TMP_HELLO}"
+mcopy -i "${NVME_IMG}" "${TMP_HELLO}" ::/HELLO.TXT
+rm -f "${TMP_HELLO}"
 
 # Build raw GPT disk image if parted and mtools are available
 DISK_IMG="${REPO_ROOT}/build/disk.img"

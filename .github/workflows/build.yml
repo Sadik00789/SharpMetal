@@ -18,12 +18,21 @@ jobs:
         with:
           dotnet-version: '9.0.x'
 
-      - name: Install NASM and LLD
+      - name: Install Build Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y nasm lld mtools parted
+          sudo apt-get install -y nasm lld mtools qemu-system-x86 ovmf python3 parted dosfstools
 
-      - name: Build BOOTX64.EFI
+      - name: Cache & Restore Native AOT Compiler
+        run: |
+          mkdir -p /tmp/ilc_init
+          cd /tmp/ilc_init
+          dotnet new console --no-restore
+          dotnet add package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0
+          cd -
+          rm -rf /tmp/ilc_init
+
+      - name: Build BOOTX64.EFI & Disk Image
         run: |
           bash build/scripts/Make-DiskImage.sh
 

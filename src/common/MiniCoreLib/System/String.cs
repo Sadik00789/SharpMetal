@@ -41,6 +41,21 @@ namespace System
             return !(a == b);
         }
 
+        public unsafe bool StartsWith(String prefix)
+        {
+            if ((object)prefix == null) return false;
+            if (prefix._stringLength > _stringLength) return false;
+            fixed (char* ap = &_firstChar)
+            fixed (char* bp = &prefix._firstChar)
+            {
+                for (int i = 0; i < prefix._stringLength; i++)
+                {
+                    if (ap[i] != bp[i]) return false;
+                }
+            }
+            return true;
+        }
+
         public override bool Equals(object? obj) => obj is string s && this == s;
         public override int GetHashCode() => _stringLength;
     }

@@ -17,6 +17,9 @@ namespace InputHid
 
         private static bool s_shiftDown = false;
         private static bool s_capsLock = false;
+        private static bool s_extended = false;
+        private static byte s_pending0 = 0;
+        private static byte s_pending1 = 0;
 
         public static void Initialize()
         {
@@ -29,6 +32,9 @@ namespace InputHid
 
             s_shiftDown = false;
             s_capsLock = false;
+            s_extended = false;
+            s_pending0 = 0;
+            s_pending1 = 0;
 
             // Serial Token 4
             SyscallWrappers.Log("[INPUT] PS/2 keyboard controller online.\n");
@@ -36,6 +42,14 @@ namespace InputHid
 
         public static uint ReadKey()
         {
+            if (s_pending0 != 0)
+            {
+                uint queued = s_pending0;
+                s_pending0 = s_pending1;
+                s_pending1 = 0;
+                return queued;
+            }
+
             // Check if output buffer full
             if ((PortIn8(StatusPort) & 1) == 0)
             {
@@ -43,6 +57,35 @@ namespace InputHid
             }
 
             byte sc = PortIn8(DataPort);
+
+            // Extended scancode prefix
+            if (sc == 0xE0)
+            {
+                s_extended = true;
+                return 0;
+            }
+
+            if (s_extended)
+            {
+                s_extended = false;
+                if ((sc & 0x80) != 0) return 0; // Key release
+
+                // Up Arrow: 0xE0 0x48 -> \x1b[A
+                if (sc == 0x48)
+                {
+                    s_pending0 = (byte)'[';
+                    s_pending1 = (byte)'A';
+                    return 0x1B;
+                }
+                // Down Arrow: 0xE0 0x50 -> \x1b[B
+                if (sc == 0x50)
+                {
+                    s_pending0 = (byte)'[';
+                    s_pending1 = (byte)'B';
+                    return 0x1B;
+                }
+                return 0;
+            }
 
             // Handle Shift press / release
             if (sc == 0x2A || sc == 0x36) // Left / Right Shift down

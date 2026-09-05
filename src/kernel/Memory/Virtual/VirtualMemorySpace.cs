@@ -312,16 +312,28 @@ namespace Kernel.Memory.Virtual
             }
 
             ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
+            bool isCurrentCr3 = Cpu.ReadCr3() == userPml4Phys;
             for (ulong offset = 0; offset < alignedSize; offset += 4096)
             {
-                MapUserPage4K(userPml4, alignedVirt + offset, alignedPhys + offset, flags);
+                ulong pageVirt = alignedVirt + offset;
+                MapUserPage4K(userPml4, pageVirt, alignedPhys + offset, flags);
+                if (isCurrentCr3)
+                {
+                    InvalidatePage(pageVirt);
+                }
             }
 
             // Invalidate TLB if modifying current CR3
-            if (Cpu.ReadCr3() == userPml4Phys)
+            if (isCurrentCr3)
             {
                 Cpu.WriteCr3(userPml4Phys);
             }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static void InvalidatePage(ulong virtAddr)
+        {
+            Cpu.Invlpg(virtAddr);
         }
 
         public static ulong GetPhysicalAddress(ulong pml4Phys, ulong virtAddr)

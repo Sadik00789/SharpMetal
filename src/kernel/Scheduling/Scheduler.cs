@@ -207,9 +207,10 @@ namespace Kernel.Scheduling
 
             tcb->CurrentRsp = (ulong)sp;
 
+            ulong rflags = Cpu.ReadRflags();
             Cpu.DisableInterrupts();
             EnqueueThread(tcb);
-            Cpu.EnableInterrupts();
+            Cpu.RestoreRflags(rflags);
 
             return tcb;
         }

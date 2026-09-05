@@ -6,10 +6,12 @@
 [![IPC](https://img.shields.io/badge/IPC-Capability--Based%20%28seL4--Style%29-orange.svg)]()
 [![SIMD](https://img.shields.io/badge/Compositor-AVX2%20256--bit-yellowgreen.svg)]()
 [![Storage](https://img.shields.io/badge/Driver-NVMe%20Direct%20DMA-red.svg)]()
+[![Filesystem](https://img.shields.io/badge/Filesystem-FAT32%20VFS-blueviolet.svg)]()
+[![Network](https://img.shields.io/badge/Network-VirtIO--Net%20PCIe-success.svg)]()
 
 A high-performance, capability-based bare-metal operating system microkernel and multi-server userland written entirely in **C# using Native AOT compilation**, targeting modern 64-bit x86-64 hardware without any dependencies on the standard runtime (CoreCLR), glibc, or external bootloaders.
 
-The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
+The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
 
 ---
 
@@ -18,13 +20,15 @@ The system boots directly from UEFI firmware into higher-half virtual memory, en
 ```mermaid
 graph TD
     subgraph Ring3_Userland ["Ring 3: Isolated Userland Processes (CPL = 3)"]
-        Shell["apps/shell<br/><i>Micro-GC Runtime | PSF2 Text Grid</i>"]
+        Shell["apps/shell<br/><i>Micro-GC Runtime | PSF2 Text Grid | History</i>"]
         StorageDriver["storage.nvme<br/><i>ZeroAlloc Runtime | SPSC DMA Queues</i>"]
-        InputDriver["input.hid<br/><i>ZeroAlloc Runtime | PS/2 Scancodes</i>"]
-        DisplayServer["display_server<br/><i>AVX2 Vector Blitter | Framebuffer</i>"]
+        Fat32Server["fs.fat32<br/><i>ZeroAlloc Runtime | BPB & Cluster Chains</i>"]
+        NetDriver["net.virtio<br/><i>ZeroAlloc Runtime | Modern PCIe Capabilities</i>"]
+        InputDriver["input.hid<br/><i>ZeroAlloc Runtime | PS/2 ANSI Translation</i>"]
+        DisplayServer["display_server<br/><i>AVX2 Vector Blitter | Alpha Blending</i>"]
         PciServer["pci_server<br/><i>PCIe ECAM Discovery | FLR</i>"]
         Supervisor["supervisor<br/><i>Watchdog | Fault Reincarnation</i>"]
-        Roottask["roottask<br/><i>Bootstrap Initrd | Process Spawner</i>"]
+        Roottask["roottask<br/><i>Bootstrap Initrd | CSpace Delegator</i>"]
     end
 
     subgraph IPC_Layer ["Roslyn Source-Generated Zero-Alloc RPC"]
@@ -44,12 +48,15 @@ graph TD
         CPU["x86-64 CPU (AVX2, FS/GS, SYSCALL)"]
         GOP["UEFI Graphics Output Protocol (GOP FB)"]
         NVMeHW["PCIe NVMe Block Device (Direct DMA)"]
+        NetHW["VirtIO-Net PCIe Controller"]
         KBHW["PS/2 Keyboard Controller (Port 0x60/0x64)"]
         PCIeECAM["PCIe ECAM Memory-Mapped Config Space"]
     end
 
     Shell -->|RegisterSurface / CommitSurface| DisplayServer
-    Shell -->|Block Read / Write| StorageDriver
+    Shell -->|ReadAllText / ReadAllBytes| Fat32Server
+    Shell -->|SendPacket / ReceivePacket| NetDriver
+    Fat32Server -->|ReadBlock / WriteBlock| StorageDriver
     Shell -->|Enumerate Topology| PciServer
     Supervisor -->|FLR Reset / Reincarnate| PciServer
     Supervisor -->|Health Check| DisplayServer
@@ -64,6 +71,7 @@ graph TD
     Ring0_Kernel --> CPU
     DisplayServer --> GOP
     StorageDriver --> NVMeHW
+    NetDriver --> NetHW
     InputDriver --> KBHW
     PciServer --> PCIeECAM
 ```
@@ -80,12 +88,12 @@ graph TD
 | **4** | **Threading & Preemptive MLFQ** | Implements preemptive Multi-Level Feedback Queue scheduler with 4 priority levels, round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`) for `SYSCALL`/`SYSRET`. |
 | **5** | **Capability Space (CSpace)** | seL4-inspired authorization model. Resources (threads, endpoints, notifications, page frames, CNodes) are referenced via guarded capability pointers (`cptr`) with cryptographic badge identification and fine-grained access rights (`Read`, `Write`, `Call`, `Grant`). |
 | **6** | **Unified IPC Engine** | Dual-mode IPC supporting zero-copy synchronous rendezvous with timeslice donation (`sys_call`/`sys_reply`), 64-bit atomic asynchronous notifications (`sys_notify`), and unified dual-wait reactors (`sys_recv_any`). |
-| **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, and drops the CPU to Ring 3 (`CPL = 3`) via `iretq` with hardware stack alignment. |
+| **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq`. |
 | **8** | **Dual Runtimes & Roslyn RPC** | **`Userland.Runtime.ZeroAlloc`**: Freestanding, allocation-free runtime backed by `NativeArena` for device drivers.<br/>**`Userland.Runtime.Gc`**: Generational mark-sweep micro-GC for user applications.<br/>**`Microkernel.RpcGenerator`**: Roslyn Source Generator emitting devirtualized zero-alloc RPC proxies. |
-| **9** | **PCIe Discovery & NVMe Driver** | `pci_server` maps ECAM space (`0xE0000000`) and queries hardware topologies. `storage.nvme` enables PCI Bus Mastering and 64-bit BAR0, sets up 4 KiB contiguous submission/completion rings (ASQ, ACQ, IOSQ, IOCQ), and executes high-speed block I/O. |
-| **10** | **Human Interface Input Driver** | `input.hid` driver operating in userland with Ring 3 port I/O privileges (IOPL = 3), polling PS/2 controller data/status ports (`0x60`/`0x64`) and decoding scancodes to ASCII key events. |
+| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`). `storage.nvme` sets up 4 KiB contiguous rings (ASQ, ACQ, IOSQ, IOCQ) and canary block benchmarking. `net.virtio` parses PCI Vendor-Specific capabilities (ID 0x09, cfg_type 1-4) and drives modern VirtIO-Net. |
+| **10** | **FAT32 Filesystem Server & VFS** | `fs.fat32` mounts root block storage, parses BPB/FAT32 structures, and provides cluster-chain lookups. `Microkernel.Vfs` exposes clean `System.IO.File` APIs (`ReadAllText`, `ReadAllBytes`) using shared DMA pages. |
 | **11** | **Fault Recovery & Supervisor** | `supervisor` acts as a watchdog process. Intercepts crashed or faulty driver states, performs PCIe Function-Level Resets (FLR), reincarnates child server execution, and reconstructs IPC capability bindings. |
-| **12** | **Compositor & Graphic Shell** | `display_server` composites surfaces directly using AVX2 SIMD vector instructions (`vmovdqu`). `apps/shell` provides an interactive command prompt with PSF2 8x16 font rendering, surface registration, and live system diagnostics. |
+| **12** | **Compositor & Graphic Shell** | `display_server` composites surfaces directly using AVX2 SIMD vector instructions (`vmovdqu`) with 8-bit alpha blending and dirty region clipping. `apps/shell` provides command history ring buffering, PSF2 font rendering, and integration commands. |
 
 ---
 
@@ -107,6 +115,7 @@ baremetal-csharp-microkernel/
 │   │   └── shell/                  # Layer 12: Interactive graphic terminal shell (Micro-GC)
 │   ├── common/
 │   │   ├── Microkernel.Abstractions/ # Syscall numbers, RPC contracts, capability definitions
+│   │   ├── Microkernel.Vfs/        # Layer 10: Virtual File System & System.IO.File abstraction
 │   │   └── MiniCoreLib/            # Freestanding BCL implementation (no external stdlib)
 │   ├── compiler-plugins/
 │   │   └── Microkernel.RpcGenerator/ # Roslyn Source Generator for type-safe IPC dispatchers
@@ -119,17 +128,19 @@ baremetal-csharp-microkernel/
 │   │   ├── Memory/                 # PMM bitmap, 4-level paging, HHDM, DMA arena, Slab allocator
 │   │   └── Scheduling/             # Preemptive MLFQ scheduler, TCB, context switching
 │   ├── libs/
-│   │   └── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization
+│   │   └── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization, alpha blend
 │   ├── runtime/
 │   │   ├── Userland.Runtime.Gc/    # Layer 8: Managed heap, mark-sweep micro-garbage collector
 │   │   └── Userland.Runtime.ZeroAlloc/ # Layer 8: Allocation-free driver runtime with syscall stubs
 │   └── servers/                    # Ring 3 Isolated System Servers
-│       ├── display_server/         # Layer 12: AVX2 hardware framebuffer compositor
+│       ├── display_server/         # Layer 12: AVX2 hardware framebuffer compositor & dirty clipper
 │       ├── drivers/
-│       │   ├── input.hid/          # Layer 10: PS/2 keyboard driver & scancode translator
+│       │   ├── input.hid/          # Layer 10: PS/2 keyboard driver & ANSI escape sequence translator
+│       │   ├── net.virtio/         # Layer 9: VirtIO-Net modern PCIe controller driver
 │       │   └── storage.nvme/       # Layer 9: High-throughput NVMe DMA storage driver
+│       ├── fs.fat32/               # Layer 10: Ring 3 FAT32 filesystem server
 │       ├── pci_server/             # Layer 9: PCIe ECAM topology discovery and FLR control
-│       ├── roottask/               # Layer 7: Initial bootstrap task and process synthesizer
+│       ├── roottask/               # Layer 7: Initial bootstrap task and CSpace delegator
 │       └── supervisor/             # Layer 11: Process watchdog and fault recovery supervisor
 ├── .gitignore                      # Git exclusion rules for native & managed artifacts
 ├── Directory.Build.props           # Workspace-wide Roslyn and compilation flags

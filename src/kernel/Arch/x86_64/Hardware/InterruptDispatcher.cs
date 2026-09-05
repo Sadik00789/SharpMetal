@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Kernel.Diagnostics;
+using Microkernel.Abstractions.Capabilities;
 
 namespace Kernel.Arch.x86_64.Hardware
 {
@@ -55,8 +56,45 @@ namespace Kernel.Arch.x86_64.Hardware
                 return;
             }
 
-            // Unhandled exception report
-            EarlySerial.Write("[FAULT] Unhandled Vector: ");
+            // Check privilege level: Ring 3 (CPL = 3) vs Ring 0 (Kernel)
+            if ((ctx->Cs & 3) == 3)
+            {
+                EarlySerial.Write("[FAULT] Ring 3 Exception Vector: ");
+                EarlySerial.WriteHex(ctx->Vector);
+                EarlySerial.Write(" ErrorCode: ");
+                EarlySerial.WriteHex(ctx->ErrorCode);
+                EarlySerial.Write(" RIP: ");
+                EarlySerial.WriteHex(ctx->Rip);
+                EarlySerial.Write(" CR2: ");
+                EarlySerial.WriteHex(Cpu.ReadCr2());
+                EarlySerial.WriteLine("");
+
+                var current = Kernel.Scheduling.Scheduler.CurrentThread;
+                if (current != null)
+                {
+                    current->State = Kernel.Scheduling.ThreadState.Dead;
+
+                    // If CurrentThread->CSpaceRoot contains a supervisor capability at Slot 8, signal it
+                    if (current->CSpaceRoot != null)
+                    {
+                        Kernel.Capabilities.Capability* cap;
+                        if (Kernel.Capabilities.CSpace.LookupCapability(current->CSpaceRoot, 8, CapabilityRights.Write, out cap) == Kernel.Capabilities.CSpace.ErrSuccess)
+                        {
+                            if (cap->Type == CapabilityType.Notification)
+                            {
+                                ((Kernel.Ipc.Notification*)cap->TargetObject)->Signal(0xDEAD);
+                            }
+                        }
+                    }
+
+                    // Yield control to the next ready thread
+                    Kernel.Scheduling.Scheduler.Schedule();
+                    return;
+                }
+            }
+
+            // Kernel-mode unhandled exception report (halt CPU)
+            EarlySerial.Write("[FAULT] Kernel Panic Vector: ");
             EarlySerial.WriteHex(ctx->Vector);
             EarlySerial.Write(" ErrorCode: ");
             EarlySerial.WriteHex(ctx->ErrorCode);
