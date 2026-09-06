@@ -117,5 +117,35 @@ namespace Kernel.Arch.x86_64.Hardware
             // Configure XCR0 to enable x87 (bit 0), SSE (bit 1), and AVX (bit 2)
             XSetBv(0, 0x07UL);
         }
+
+        [DllImport("*")]
+        public static extern uint CpuIdEcx(uint leaf);
+
+        [DllImport("*")]
+        public static extern void Halt();
+
+        public static bool IsHypervisor()
+        {
+            uint ecx = CpuIdEcx(1);
+            if ((ecx & (1u << 31)) != 0)
+            {
+                return true;
+            }
+
+            if (Boot.KernelHigh.RsdpPhysBase != 0)
+            {
+                byte* rsdp = (byte*)Memory.Virtual.Hhdm.PhysicalToVirtual(Boot.KernelHigh.RsdpPhysBase);
+                if (rsdp[9] == 'B' && rsdp[10] == 'O' && rsdp[11] == 'C' && rsdp[12] == 'H' && rsdp[13] == 'S')
+                {
+                    return true;
+                }
+                if (rsdp[9] == 'Q' && rsdp[10] == 'E' && rsdp[11] == 'M' && rsdp[12] == 'U')
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 }

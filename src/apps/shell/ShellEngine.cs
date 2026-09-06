@@ -53,7 +53,9 @@ namespace Shell
                 grid.WriteString("  net          - Run VirtIO-Net network benchmark\n");
                 grid.WriteString("  cat <file>   - Read and display file from FAT32 volume\n");
                 grid.WriteString("  echo <text>  - Print text to terminal\n");
-                grid.WriteString("  exit         - Shut down microkernel\n");
+                grid.WriteString("  exit         - Power off microkernel\n");
+                grid.WriteString("  poweroff     - Power off microkernel\n");
+                grid.WriteString("  reboot       - Reboot system\n");
             }
             else if (MatchCommand(buf, len, "clear"))
             {
@@ -167,11 +169,16 @@ namespace Shell
                 grid.WriteString("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
                 SyscallWrappers.Log("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
             }
-            else if (MatchCommand(buf, len, "exit"))
+            else if (MatchCommand(buf, len, "exit") || MatchCommand(buf, len, "poweroff") || MatchCommand(buf, len, "shutdown"))
             {
                 grid.WriteString("[SHELL] Shutting down system...\n");
                 SyscallWrappers.Log("[SUCCESS] Phase 10 fully operational. Exiting QEMU...\n");
                 SyscallWrappers.Exit(0);
+            }
+            else if (MatchCommand(buf, len, "reboot") || MatchCommand(buf, len, "reset"))
+            {
+                grid.WriteString("[SHELL] Rebooting system...\n");
+                SyscallWrappers.Exit(1);
             }
             else
             {

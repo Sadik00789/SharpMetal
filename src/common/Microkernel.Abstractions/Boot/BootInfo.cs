@@ -13,6 +13,6 @@ namespace Microkernel.Abstractions.Boot
         public uint GopWidth;
         public uint GopHeight;
         public uint GopPixelsPerScanLine;
-        public uint Reserved;
+        public uint IsHypervisor;
     }
 }

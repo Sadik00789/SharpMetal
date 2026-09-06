@@ -53,6 +53,14 @@ namespace Kernel.Ipc
                 case SyscallNumbers.SysExit: // 0x04
                     EarlySerial.WriteLine("[SUCCESS] Phase 9 fully operational. All 12 layers verified. Exiting QEMU...");
                     PortIo.Out8(0xF4, 0x10);
+                    if (a1 == 1)
+                    {
+                        AcpiPower.Reboot();
+                    }
+                    else
+                    {
+                        AcpiPower.Shutdown();
+                    }
                     return 0;
 
                 case SyscallNumbers.SysCreateThread: // 0x05
@@ -88,7 +96,7 @@ namespace Kernel.Ipc
                         info->GopWidth = KernelHigh.GopWidth;
                         info->GopHeight = KernelHigh.GopHeight;
                         info->GopPixelsPerScanLine = KernelHigh.GopPixelsPerScanLine;
-                        info->Reserved = 0;
+                        info->IsHypervisor = Cpu.IsHypervisor() ? 1u : 0u;
                         return 0;
                     }
                     return 1;

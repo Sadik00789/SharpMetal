@@ -235,3 +235,27 @@ SwitchToHigherHalf:
 
     ; 4. Jump to higher-half kernel entry point
     jmp r8
+
+; -----------------------------------------------------------------------------
+; CPUID ECX query (Microsoft x64 ABI: rcx = leaf, rax = ecx return)
+; -----------------------------------------------------------------------------
+global CpuIdEcx
+CpuIdEcx:
+    push rbx
+    mov eax, ecx
+    xor ecx, ecx
+    cpuid
+    mov eax, ecx
+    pop rbx
+    ret
+
+; -----------------------------------------------------------------------------
+; Infinite Halt (cli; hlt; jmp)
+; -----------------------------------------------------------------------------
+global Halt
+Halt:
+    cli
+.loop:
+    hlt
+    jmp .loop
+

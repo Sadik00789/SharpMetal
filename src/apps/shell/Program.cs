@@ -1,6 +1,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Microkernel.Abstractions.Boot;
 using Microkernel.Drawing;
 using Microkernel.Abstractions.Services;
 using Userland.Runtime.Gc.Memory;
@@ -98,7 +99,25 @@ namespace Shell
                             TerminalHistory.Add(cmdBuffer, cmdLen);
                             historyIndex = -1;
 
-                            ShellEngine.ExecuteCommand(cmdBuffer, cmdLen, ref Grid);
+                            if (ShellEngine.MatchCommand(cmdBuffer, cmdLen, "exit") ||
+                                ShellEngine.MatchCommand(cmdBuffer, cmdLen, "poweroff") ||
+                                ShellEngine.MatchCommand(cmdBuffer, cmdLen, "shutdown"))
+                            {
+                                Grid.WriteString("[SHELL] Powering off system...\n");
+                                RenderAndCommit(ref displayClient, surfaceId);
+                                SyscallWrappers.Exit(0);
+                            }
+                            else if (ShellEngine.MatchCommand(cmdBuffer, cmdLen, "reboot") ||
+                                     ShellEngine.MatchCommand(cmdBuffer, cmdLen, "reset"))
+                            {
+                                Grid.WriteString("[SHELL] Rebooting system...\n");
+                                RenderAndCommit(ref displayClient, surfaceId);
+                                SyscallWrappers.Exit(1);
+                            }
+                            else
+                            {
+                                ShellEngine.ExecuteCommand(cmdBuffer, cmdLen, ref Grid);
+                            }
                         }
 
                         cmdLen = 0;
@@ -153,6 +172,9 @@ namespace Shell
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ShellMain")]
         public static void Main()
         {
+            KernelBootInfo bootInfo = default;
+            SyscallWrappers.GetBootInfo(&bootInfo);
+
             // 1. Initialize Micro-GC runtime (Layer 8)
             ulong gcSlabPhys = SyscallWrappers.AllocDma(65536, 0x39000000UL);
             byte* gcSlab = (byte*)0x39000000UL;
@@ -221,21 +243,24 @@ namespace Shell
             RenderAndCommit(ref displayClient, surfaceId);
             DelayPaced(3000000);
 
-            // 12. Command 5: 'exit'
-            Grid.WriteString("kernel:> exit\n");
-            RenderAndCommit(ref displayClient, surfaceId);
-            DelayPaced(3000000);
+            if (bootInfo.IsHypervisor != 0)
+            {
+                // In automated QEMU test harness: execute scripted 'exit' command to finish CI verification
+                Grid.WriteString("kernel:> exit\n");
+                RenderAndCommit(ref displayClient, surfaceId);
+                DelayPaced(3000000);
 
-            // 13. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
-            ShellEngine.ExecuteCommand("exit", ref Grid);
+                ShellEngine.ExecuteCommand("exit", ref Grid);
+            }
+            else
+            {
+                // On bare-metal physical hardware: transition directly into interactive shell
+                Grid.WriteString("\n[SHELL] Interactive mode online. Type 'help' for commands.\n");
+                Grid.WriteString("kernel:> ");
+                RenderAndCommit(ref displayClient, surfaceId);
 
-            // 14. On bare metal, SysExit(0) returns because port 0xF4 is not an exit device.
-            // Transition smoothly into Interactive Graphic Shell!
-            Grid.WriteString("\n[SHELL] Interactive mode online. Type 'help' for commands.\n");
-            Grid.WriteString("kernel:> ");
-            RenderAndCommit(ref displayClient, surfaceId);
-
-            RunInteractiveLoop(ref displayClient, surfaceId);
+                RunInteractiveLoop(ref displayClient, surfaceId);
+            }
         }
     }
 }
