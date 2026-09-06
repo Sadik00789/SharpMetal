@@ -146,13 +146,6 @@ namespace Kernel.Boot
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "KernelMainHigh")]
         public static void KernelMainHigh()
         {
-            // Visual Checkpoint 1 (GREEN stripe, scanlines 10..19): Entered KernelMainHigh!
-            if (GopPhysBase != 0)
-            {
-                uint* fb = (uint*)GopPhysBase;
-                for (ulong i = GopWidth * 10; i < GopWidth * 20; i++) fb[i] = 0x0000FF00;
-            }
-
             EarlySerial.WriteLine();
             EarlySerial.WriteLine("=================================================================");
             EarlySerial.WriteLine("   Bare-Metal x86-64 C# Microkernel (Native AOT / Higher-Half)  ");

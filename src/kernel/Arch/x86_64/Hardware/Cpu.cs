@@ -124,6 +124,9 @@ namespace Kernel.Arch.x86_64.Hardware
         [DllImport("*")]
         public static extern void Halt();
 
+        [DllImport("*")]
+        public static extern void TripleFaultReset();
+
         public static bool IsHypervisor()
         {
             uint ecx = CpuIdEcx(1);
@@ -132,7 +135,7 @@ namespace Kernel.Arch.x86_64.Hardware
                 return true;
             }
 
-            if (Boot.KernelHigh.RsdpPhysBase != 0)
+            if (Boot.KernelHigh.RsdpPhysBase >= 0x1000UL && Boot.KernelHigh.RsdpPhysBase < (16UL * 1024 * 1024 * 1024))
             {
                 byte* rsdp = (byte*)Memory.Virtual.Hhdm.PhysicalToVirtual(Boot.KernelHigh.RsdpPhysBase);
                 if (rsdp[9] == 'B' && rsdp[10] == 'O' && rsdp[11] == 'C' && rsdp[12] == 'H' && rsdp[13] == 'S')

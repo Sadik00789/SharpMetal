@@ -259,3 +259,18 @@ Halt:
     hlt
     jmp .loop
 
+; -----------------------------------------------------------------------------
+; Universal Hardware Reset via CPU Triple Fault (lidt [0] + int3)
+; -----------------------------------------------------------------------------
+global TripleFaultReset
+TripleFaultReset:
+    cli
+    push qword 0
+    push qword 0
+    lidt [rsp]
+    int3
+.halt:
+    hlt
+    jmp .halt
+
+

@@ -17,254 +17,490 @@ namespace Kernel.Arch.x86_64.Hardware
             }
         }
 
+        private static bool IsValidPhys(ulong phys)
+        {
+            return phys >= 0x1000UL && phys < (16UL * 1024 * 1024 * 1024);
+        }
+
+        private static void BlankScreen()
+        {
+            ulong fbPhys = KernelHigh.GopPhysBase;
+            if (IsValidPhys(fbPhys))
+            {
+                uint* fb = (uint*)Hhdm.PhysicalToVirtual(fbPhys);
+                ulong totalPixels = KernelHigh.GopFbSize > 0 ? (KernelHigh.GopFbSize / 4) : ((ulong)KernelHigh.GopWidth * KernelHigh.GopHeight);
+                if (totalPixels > 0)
+                {
+                    ulong maxPixels = 3840UL * 2160UL;
+                    if (totalPixels > maxPixels) totalPixels = maxPixels;
+                    for (ulong i = 0; i < totalPixels; i++)
+                    {
+                        fb[i] = 0x00000000;
+                    }
+                }
+            }
+        }
+
+        private static void WriteGas(byte* gas, ulong value)
+        {
+            byte space = gas[0];
+            ulong addr = *(ulong*)(gas + 4);
+            if (addr == 0) return;
+
+            if (space == 1) // System I/O
+            {
+                ushort port = (ushort)addr;
+                byte bitWidth = gas[1];
+                if (bitWidth == 8)
+                    PortIo.Out8(port, (byte)value);
+                else if (bitWidth == 32)
+                    PortIo.Out32(port, (uint)value);
+                else
+                    PortIo.Out16(port, (ushort)value);
+            }
+            else if (space == 0) // System Memory / MMIO
+            {
+                if (IsValidPhys(addr))
+                {
+                    ulong virt = Hhdm.PhysicalToVirtual(addr);
+                    byte bitWidth = gas[1];
+                    if (bitWidth == 8)
+                        *(byte*)virt = (byte)value;
+                    else if (bitWidth == 32)
+                        *(uint*)virt = (uint)value;
+                    else
+                        *(ushort*)virt = (ushort)value;
+                }
+            }
+        }
+
+        private static ulong ReadGas(byte* gas)
+        {
+            byte space = gas[0];
+            ulong addr = *(ulong*)(gas + 4);
+            if (addr == 0) return 0;
+
+            if (space == 1) // System I/O
+            {
+                ushort port = (ushort)addr;
+                byte bitWidth = gas[1];
+                if (bitWidth == 8) return PortIo.In8(port);
+                if (bitWidth == 32) return PortIo.In32(port);
+                return PortIo.In16(port);
+            }
+            else if (space == 0) // System Memory
+            {
+                if (IsValidPhys(addr))
+                {
+                    ulong virt = Hhdm.PhysicalToVirtual(addr);
+                    byte bitWidth = gas[1];
+                    if (bitWidth == 8) return *(byte*)virt;
+                    if (bitWidth == 32) return *(uint*)virt;
+                    return *(ushort*)virt;
+                }
+            }
+            return 0;
+        }
+
+        private static byte* FindFadt(out byte* rootTableOut, out bool isXsdtOut, out int numEntriesOut)
+        {
+            rootTableOut = null;
+            isXsdtOut = false;
+            numEntriesOut = 0;
+
+            ulong rsdpPhys = KernelHigh.RsdpPhysBase;
+            if (!IsValidPhys(rsdpPhys)) return null;
+
+            byte* rsdp = (byte*)Hhdm.PhysicalToVirtual(rsdpPhys);
+            if (rsdp[0] != 'R' || rsdp[1] != 'S' || rsdp[2] != 'D' || rsdp[3] != ' ' ||
+                rsdp[4] != 'P' || rsdp[5] != 'T' || rsdp[6] != 'R' || rsdp[7] != ' ')
+            {
+                return null;
+            }
+
+            byte revision = rsdp[15];
+            ulong rootTablePhys = 0;
+            if (revision >= 2)
+            {
+                ulong xsdt = *(ulong*)(rsdp + 24);
+                if (IsValidPhys(xsdt)) rootTablePhys = xsdt;
+            }
+            if (rootTablePhys == 0)
+            {
+                uint rsdt = *(uint*)(rsdp + 16);
+                if (IsValidPhys(rsdt)) rootTablePhys = rsdt;
+            }
+
+            if (!IsValidPhys(rootTablePhys)) return null;
+
+            byte* rootTable = (byte*)Hhdm.PhysicalToVirtual(rootTablePhys);
+            bool isXsdt = (rootTable[0] == 'X' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
+            bool isRsdt = (rootTable[0] == 'R' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
+            if (!isXsdt && !isRsdt) return null;
+
+            uint length = *(uint*)(rootTable + 4);
+            if (length < 36 || length > 131072) return null;
+
+            int entryStride = isXsdt ? 8 : 4;
+            int numEntries = (int)((length - 36) / (uint)entryStride);
+            if (numEntries > 256) numEntries = 256;
+
+            rootTableOut = rootTable;
+            isXsdtOut = isXsdt;
+            numEntriesOut = numEntries;
+
+            for (int i = 0; i < numEntries; i++)
+            {
+                ulong tablePhys = isXsdt ? *(ulong*)(rootTable + 36 + (i * 8)) : *(uint*)(rootTable + 36 + (i * 4));
+                if (!IsValidPhys(tablePhys)) continue;
+
+                byte* table = (byte*)Hhdm.PhysicalToVirtual(tablePhys);
+                if (table[0] == 'F' && table[1] == 'A' && table[2] == 'C' && table[3] == 'P')
+                {
+                    return table;
+                }
+            }
+
+            return null;
+        }
+
         public static void Shutdown()
         {
             EarlySerial.WriteLine("[ACPI] Initiating system shutdown (S5 Soft Off)...");
+            Cpu.DisableInterrupts();
+            BlankScreen();
 
-            ulong rsdpPhys = KernelHigh.RsdpPhysBase;
-            if (rsdpPhys != 0)
+            byte* rootTable;
+            bool isXsdt;
+            int numEntries;
+            byte* fadt = FindFadt(out rootTable, out isXsdt, out numEntries);
+
+            if (fadt != null)
             {
-                byte* rsdp = (byte*)Hhdm.PhysicalToVirtual(rsdpPhys);
-                if (rsdp[0] == 'R' && rsdp[1] == 'S' && rsdp[2] == 'D' && rsdp[3] == ' ' &&
-                    rsdp[4] == 'P' && rsdp[5] == 'T' && rsdp[6] == 'R' && rsdp[7] == ' ')
-                {
-                    byte revision = rsdp[15];
-                    ulong rootTablePhys = 0;
-                    if (revision >= 2)
-                    {
-                        rootTablePhys = *(ulong*)(rsdp + 24); // XsdtAddress
-                    }
-                    if (rootTablePhys == 0)
-                    {
-                        rootTablePhys = *(uint*)(rsdp + 16);  // RsdtAddress
-                    }
-
-                    if (rootTablePhys != 0)
-                    {
-                        byte* rootTable = (byte*)Hhdm.PhysicalToVirtual(rootTablePhys);
-                        bool isXsdt = (rootTable[0] == 'X' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
-                        bool isRsdt = (rootTable[0] == 'R' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
-
-                        if (isXsdt || isRsdt)
-                        {
-                            uint length = *(uint*)(rootTable + 4);
-                            if (length >= 36 && length <= 131072)
-                            {
-                                int entryStride = isXsdt ? 8 : 4;
-                                int numEntries = (int)((length - 36) / (uint)entryStride);
-                                if (numEntries > 256) numEntries = 256;
-
-                                byte* fadt = null;
-                                for (int i = 0; i < numEntries; i++)
-                                {
-                                    ulong tablePhys = isXsdt ? *(ulong*)(rootTable + 36 + (i * 8)) : *(uint*)(rootTable + 36 + (i * 4));
-                                    if (tablePhys == 0) continue;
-
-                                    byte* table = (byte*)Hhdm.PhysicalToVirtual(tablePhys);
-                                    if (table[0] == 'F' && table[1] == 'A' && table[2] == 'C' && table[3] == 'P')
-                                    {
-                                        fadt = table;
-                                        break;
-                                    }
-                                }
-
-                                if (fadt != null)
-                                {
-                                    ExecuteFadtShutdown(fadt);
-                                }
-                            }
-                        }
-                    }
-                }
+                ExecuteFadtShutdown(fadt, rootTable, isXsdt, numEntries);
             }
 
-            // If ACPI S5 Soft Off didn't power off the system, run hardware reset fallbacks
-            Reboot();
+            // Standard emulator poweroff ports fallback
+            PortIo.Out16(0x604, 0x2000);
+            PortIo.Out16(0x604, 0x0000);
+            PortIo.Out16(0xB004, 0x2000);
+            PortIo.Out16(0x4004, 0x3400);
+            PortIo.Out8(0x3C0, 0x00);
+            Delay(1000000);
+
+            EarlySerial.WriteLine("[ACPI] Shutdown sequence complete. Halting CPU...");
+            while (true)
+            {
+                Cpu.Halt();
+            }
         }
 
-        private static void ExecuteFadtShutdown(byte* fadt)
+        private static void ExecuteFadtShutdown(byte* fadt, byte* rootTable, bool isXsdt, int numEntries)
         {
             uint fadtLen = *(uint*)(fadt + 4);
 
+            // Table 5-34: DSDT at offset 40 (4 bytes), X_DSDT at offset 140 (8 bytes)
             ulong dsdtPhys = 0;
             if (fadtLen >= 148)
             {
-                dsdtPhys = *(ulong*)(fadt + 112); // X_DSDT
-            }
-            if (dsdtPhys == 0)
-            {
-                dsdtPhys = *(uint*)(fadt + 40);  // DSDT
-            }
-
-            uint smiCmd = *(uint*)(fadt + 48);
-            byte acpiEnable = *(byte*)(fadt + 52);
-            uint pm1aCnt = *(uint*)(fadt + 64);
-            uint pm1bCnt = *(uint*)(fadt + 68);
-
-            // Check ACPI 2.0+ Extended PM1a/PM1b GAS
-            if (fadtLen >= 152)
-            {
-                byte pm1aGasSpace = *(byte*)(fadt + 140);
-                ulong pm1aGasAddr = *(ulong*)(fadt + 140 + 4);
-                if (pm1aGasSpace == 1 && pm1aGasAddr != 0)
+                ulong xdsdt = *(ulong*)(fadt + 140);
+                if (IsValidPhys(xdsdt))
                 {
-                    pm1aCnt = (uint)pm1aGasAddr;
+                    dsdtPhys = xdsdt;
                 }
-
-                byte pm1bGasSpace = *(byte*)(fadt + 152);
-                ulong pm1bGasAddr = *(ulong*)(fadt + 152 + 4);
-                if (pm1bGasSpace == 1 && pm1bGasAddr != 0)
+            }
+            if (dsdtPhys == 0 && fadtLen >= 44)
+            {
+                uint dsdt32 = *(uint*)(fadt + 40);
+                if (IsValidPhys(dsdt32))
                 {
-                    pm1bCnt = (uint)pm1bGasAddr;
+                    dsdtPhys = dsdt32;
                 }
             }
 
-            EarlySerial.Write("[ACPI] PM1a_CNT: 0x");
-            EarlySerial.WriteHex(pm1aCnt);
-            EarlySerial.Write(" PM1b_CNT: 0x");
-            EarlySerial.WriteHex(pm1bCnt);
+            uint smiCmd = (fadtLen >= 52) ? *(uint*)(fadt + 48) : 0;
+            byte acpiEnable = (fadtLen >= 53) ? *(byte*)(fadt + 52) : (byte)0;
+            uint pm1aPort = (fadtLen >= 68) ? *(uint*)(fadt + 64) : 0;
+            uint pm1bPort = (fadtLen >= 72) ? *(uint*)(fadt + 68) : 0;
+
+            byte* xPm1aGas = null;
+            byte* xPm1bGas = null;
+
+            // ACPI 2.0+ Extended PM1a/PM1b GAS:
+            // Table 5-34: X_PM1a_CNT_BLK at offset 172 (12 bytes GAS)
+            if (fadtLen >= 184)
+            {
+                byte* gas = fadt + 172;
+                ulong addr = *(ulong*)(gas + 4);
+                if (addr != 0)
+                {
+                    xPm1aGas = gas;
+                    if (gas[0] == 1) pm1aPort = (uint)addr;
+                }
+            }
+
+            // Table 5-34: X_PM1b_CNT_BLK at offset 184 (12 bytes GAS)
+            if (fadtLen >= 196)
+            {
+                byte* gas = fadt + 184;
+                ulong addr = *(ulong*)(gas + 4);
+                if (addr != 0)
+                {
+                    xPm1bGas = gas;
+                    if (gas[0] == 1) pm1bPort = (uint)addr;
+                }
+            }
+
+            // ACPI 5.0+ Hardware-Reduced SLEEP_CONTROL_REG at offset 244 (12 bytes GAS)
+            byte* sleepControlGas = null;
+            if (fadtLen >= 256)
+            {
+                byte* gas = fadt + 244;
+                ulong addr = *(ulong*)(gas + 4);
+                if (addr != 0)
+                {
+                    sleepControlGas = gas;
+                }
+            }
+
+            EarlySerial.Write("[ACPI] PM1a: 0x");
+            EarlySerial.WriteHex(pm1aPort);
+            EarlySerial.Write(" PM1b: 0x");
+            EarlySerial.WriteHex(pm1bPort);
+            if (sleepControlGas != null)
+            {
+                EarlySerial.Write(" SLEEP_CTRL: Present");
+            }
             EarlySerial.WriteLine();
 
             // Enable ACPI if disabled (SCI_EN == 0)
-            if (pm1aCnt != 0 && (PortIo.In16((ushort)pm1aCnt) & 1) == 0)
+            bool acpiActive = false;
+            if (xPm1aGas != null)
             {
-                if (smiCmd != 0 && acpiEnable != 0)
+                acpiActive = (ReadGas(xPm1aGas) & 1) != 0;
+            }
+            else if (pm1aPort != 0)
+            {
+                acpiActive = (PortIo.In16((ushort)pm1aPort) & 1) != 0;
+            }
+
+            if (!acpiActive && smiCmd != 0 && acpiEnable != 0)
+            {
+                EarlySerial.WriteLine("[ACPI] Enabling ACPI mode via SMI_CMD...");
+                PortIo.Out8((ushort)smiCmd, acpiEnable);
+                for (int retry = 0; retry < 3000; retry++)
                 {
-                    EarlySerial.WriteLine("[ACPI] Enabling ACPI mode via SMI_CMD...");
-                    PortIo.Out8((ushort)smiCmd, acpiEnable);
-                    for (int retry = 0; retry < 3000; retry++)
-                    {
-                        if ((PortIo.In16((ushort)pm1aCnt) & 1) != 0)
-                            break;
-                        PortIo.IoWait();
-                    }
+                    if (xPm1aGas != null && (ReadGas(xPm1aGas) & 1) != 0) break;
+                    if (pm1aPort != 0 && (PortIo.In16((ushort)pm1aPort) & 1) != 0) break;
+                    PortIo.IoWait();
                 }
             }
 
-            // Parse DSDT for _S5_ sleep state
+            // Parse DSDT or SSDTs for _S5_ sleep state
             byte slpTypA = 5;
             byte slpTypB = 5;
+            bool foundS5 = false;
 
-            if (dsdtPhys != 0)
+            if (dsdtPhys != 0 && IsValidPhys(dsdtPhys))
             {
                 byte* dsdt = (byte*)Hhdm.PhysicalToVirtual(dsdtPhys);
                 if (dsdt[0] == 'D' && dsdt[1] == 'S' && dsdt[2] == 'D' && dsdt[3] == 'T')
                 {
                     uint dsdtLen = *(uint*)(dsdt + 4);
-                    if (dsdtLen > 36 && dsdtLen < 2 * 1024 * 1024)
+                    if (dsdtLen > 36 && dsdtLen < 4 * 1024 * 1024)
                     {
-                        for (uint i = 36; i < dsdtLen - 8; i++)
+                        foundS5 = FindS5InAml(dsdt, dsdtLen, out slpTypA, out slpTypB);
+                    }
+                }
+            }
+
+            // Search SSDTs if _S5_ not present in DSDT
+            if (!foundS5 && rootTable != null && numEntries > 0)
+            {
+                for (int i = 0; i < numEntries; i++)
+                {
+                    ulong tablePhys = isXsdt ? *(ulong*)(rootTable + 36 + (i * 8)) : *(uint*)(rootTable + 36 + (i * 4));
+                    if (!IsValidPhys(tablePhys)) continue;
+
+                    byte* table = (byte*)Hhdm.PhysicalToVirtual(tablePhys);
+                    if (table[0] == 'S' && table[1] == 'S' && table[2] == 'D' && table[3] == 'T')
+                    {
+                        uint ssdtLen = *(uint*)(table + 4);
+                        if (ssdtLen > 36 && ssdtLen < 4 * 1024 * 1024)
                         {
-                            if (dsdt[i] == '_' && dsdt[i + 1] == 'S' && dsdt[i + 2] == '5' && dsdt[i + 3] == '_')
+                            if (FindS5InAml(table, ssdtLen, out slpTypA, out slpTypB))
                             {
-                                uint pkgIdx = i + 4;
-                                while (pkgIdx < dsdtLen && pkgIdx < i + 12 && dsdt[pkgIdx] != 0x12)
-                                {
-                                    pkgIdx++;
-                                }
-
-                                if (pkgIdx < dsdtLen && dsdt[pkgIdx] == 0x12)
-                                {
-                                    pkgIdx++; // Skip 0x12 (PackageOp)
-                                    byte lead = dsdt[pkgIdx];
-                                    int numAdditional = (lead >> 6) & 3;
-                                    pkgIdx += (uint)(1 + numAdditional); // Skip PkgLength
-
-                                    if (pkgIdx < dsdtLen)
-                                    {
-                                        byte numElements = dsdt[pkgIdx++];
-                                        if (pkgIdx < dsdtLen)
-                                        {
-                                            slpTypA = ReadAmlInteger(dsdt, ref pkgIdx, dsdtLen);
-                                        }
-                                        if (pkgIdx < dsdtLen)
-                                        {
-                                            slpTypB = ReadAmlInteger(dsdt, ref pkgIdx, dsdtLen);
-                                        }
-                                        EarlySerial.Write("[ACPI] Found _S5_ sleep types: A=");
-                                        EarlySerial.WriteDec(slpTypA);
-                                        EarlySerial.Write(" B=");
-                                        EarlySerial.WriteDec(slpTypB);
-                                        EarlySerial.WriteLine();
-                                        break;
-                                    }
-                                }
+                                foundS5 = true;
+                                EarlySerial.WriteLine("[ACPI] Found _S5_ sleep state in SSDT.");
+                                break;
                             }
                         }
                     }
                 }
             }
 
-            // Trigger S5 Soft Off: SLP_TYP in bits 10-12, SLP_EN in bit 13 (0x2000)
-            if (pm1aCnt != 0)
+            EarlySerial.Write("[ACPI] S5 Sleep Types: A=");
+            EarlySerial.WriteDec(slpTypA);
+            EarlySerial.Write(" B=");
+            EarlySerial.WriteDec(slpTypB);
+            EarlySerial.WriteLine();
+
+            // 1. ACPI 5.0+ Sleep Control Register
+            if (sleepControlGas != null)
             {
-                ushort valA = (ushort)(((slpTypA & 7) << 10) | 0x2000);
-                PortIo.Out16((ushort)pm1aCnt, valA);
-
-                if (pm1bCnt != 0)
-                {
-                    ushort valB = (ushort)(((slpTypB & 7) << 10) | 0x2000);
-                    PortIo.Out16((ushort)pm1bCnt, valB);
-                }
-
-                // Wait for power supply sequencing
-                Delay(5000000);
-
-                // Try common fallback sleep types if not yet off
-                ushort* fallbackTypes = stackalloc ushort[4] { 5, 7, 0, 3 };
-                for (int t = 0; t < 4; t++)
-                {
-                    ushort fbVal = (ushort)((fallbackTypes[t] << 10) | 0x2000);
-                    PortIo.Out16((ushort)pm1aCnt, fbVal);
-                    if (pm1bCnt != 0) PortIo.Out16((ushort)pm1bCnt, fbVal);
-                    Delay(2000000);
-                }
+                EarlySerial.WriteLine("[ACPI] Triggering SLEEP_CONTROL_REG...");
+                byte slpCtrlVal = (byte)(((slpTypA & 7) << 2) | (1 << 5));
+                WriteGas(sleepControlGas, slpCtrlVal);
+                Delay(2000000);
             }
 
-            // Check FADT RESET_REG
-            if (fadtLen >= 129)
+            // 2. Trigger S5 Soft Off via PM1a / PM1b CNT:
+            // SLP_TYP in bits 10-12, SLP_EN in bit 13 (0x2000)
+            ushort valA = (ushort)(((slpTypA & 7) << 10) | 0x2000);
+            ushort valB = (ushort)(((slpTypB & 7) << 10) | 0x2000);
+
+            if (xPm1aGas != null)
             {
-                byte resetSpace = *(byte*)(fadt + 116);
-                ulong resetAddr = *(ulong*)(fadt + 116 + 4);
-                byte resetVal = *(byte*)(fadt + 128);
-                if (resetSpace == 1 && resetAddr != 0)
+                WriteGas(xPm1aGas, valA);
+            }
+            else if (pm1aPort != 0)
+            {
+                PortIo.Out16((ushort)pm1aPort, valA);
+            }
+
+            if (xPm1bGas != null)
+            {
+                WriteGas(xPm1bGas, valB);
+            }
+            else if (pm1bPort != 0)
+            {
+                PortIo.Out16((ushort)pm1bPort, valB);
+            }
+
+            // Wait for power supply sequencing
+            Delay(4000000);
+
+            // 3. Fallback sleep types (5, 7, 0, 3, 1)
+            ushort* fallbackTypes = stackalloc ushort[5] { 5, 7, 0, 3, 1 };
+            for (int t = 0; t < 5; t++)
+            {
+                ushort fbVal = (ushort)((fallbackTypes[t] << 10) | 0x2000);
+                if (xPm1aGas != null) WriteGas(xPm1aGas, fbVal);
+                else if (pm1aPort != 0) PortIo.Out16((ushort)pm1aPort, fbVal);
+
+                if (xPm1bGas != null) WriteGas(xPm1bGas, fbVal);
+                else if (pm1bPort != 0) PortIo.Out16((ushort)pm1bPort, fbVal);
+
+                if (sleepControlGas != null)
                 {
-                    EarlySerial.WriteLine("[ACPI] Triggering FADT RESET_REG...");
-                    PortIo.Out8((ushort)resetAddr, resetVal);
-                    Delay(2000000);
+                    byte fbSlpCtrlVal = (byte)(((fallbackTypes[t] & 7) << 2) | (1 << 5));
+                    WriteGas(sleepControlGas, fbSlpCtrlVal);
                 }
+                Delay(1000000);
             }
         }
 
-        private static byte ReadAmlInteger(byte* dsdt, ref uint idx, uint maxLen)
+        private static bool FindS5InAml(byte* table, uint len, out byte slpTypA, out byte slpTypB)
+        {
+            slpTypA = 5;
+            slpTypB = 5;
+
+            if (table == null || len < 40) return false;
+
+            for (uint i = 36; i < len - 8; i++)
+            {
+                if (table[i] == '_' && table[i + 1] == 'S' && table[i + 2] == '5' && table[i + 3] == '_')
+                {
+                    uint pkgIdx = i + 4;
+                    while (pkgIdx < len && pkgIdx < i + 12 && table[pkgIdx] != 0x12)
+                    {
+                        pkgIdx++;
+                    }
+
+                    if (pkgIdx < len && table[pkgIdx] == 0x12)
+                    {
+                        pkgIdx++; // Skip 0x12 (PackageOp)
+                        byte lead = table[pkgIdx];
+                        int numAdditional = (lead >> 6) & 3;
+                        pkgIdx += (uint)(1 + numAdditional); // Skip PkgLength
+
+                        if (pkgIdx < len)
+                        {
+                            byte numElements = table[pkgIdx++];
+                            if (pkgIdx < len)
+                            {
+                                slpTypA = ReadAmlInteger(table, ref pkgIdx, len);
+                            }
+                            if (pkgIdx < len)
+                            {
+                                slpTypB = ReadAmlInteger(table, ref pkgIdx, len);
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        private static byte ReadAmlInteger(byte* aml, ref uint idx, uint maxLen)
         {
             if (idx >= maxLen) return 0;
-            byte op = dsdt[idx++];
+            byte op = aml[idx++];
             if (op == 0x00) return 0;
             if (op == 0x01) return 1;
             if (op == 0xFF) return 0xFF;
             if (op == 0x0A && idx < maxLen)
             {
-                return dsdt[idx++];
+                return aml[idx++];
             }
             if (op == 0x0B && idx + 1 < maxLen)
             {
-                byte val = dsdt[idx];
+                byte val = aml[idx];
                 idx += 2;
                 return val;
             }
             if (op == 0x0C && idx + 3 < maxLen)
             {
-                byte val = dsdt[idx];
+                byte val = aml[idx];
                 idx += 4;
                 return val;
             }
             return op;
         }
 
+        private static void ExecuteFadtReset()
+        {
+            byte* rootTable;
+            bool isXsdt;
+            int numEntries;
+            byte* fadt = FindFadt(out rootTable, out isXsdt, out numEntries);
+            if (fadt == null) return;
+
+            uint fadtLen = *(uint*)(fadt + 4);
+            // Table 5-34: RESET_REG at offset 116 (12 bytes GAS), RESET_VALUE at offset 128 (1 byte)
+            if (fadtLen >= 129)
+            {
+                byte* resetGas = fadt + 116;
+                ulong resetAddr = *(ulong*)(resetGas + 4);
+                byte resetVal = *(byte*)(fadt + 128);
+                if (resetAddr != 0)
+                {
+                    EarlySerial.WriteLine("[ACPI] Triggering FADT RESET_REG...");
+                    WriteGas(resetGas, resetVal);
+                    Delay(500000);
+                }
+            }
+        }
+
         public static void Reboot()
         {
             EarlySerial.WriteLine("[RESET] Attempting hardware system reset...");
+            Cpu.DisableInterrupts();
+
+            // 0. ACPI FADT RESET_REG
+            ExecuteFadtReset();
 
             // 1. PCI Reset Port 0xCF9 (standard on Intel & AMD chipsets)
             // 0x02 = System Reset, 0x06 = Reset CPU, 0x0E = Full Power Cycle
@@ -284,8 +520,15 @@ namespace Kernel.Arch.x86_64.Hardware
             PortIo.Out8(0x92, (byte)(val92 | 1));
             Delay(200000);
 
-            // 4. Halt CPU forever
-            Cpu.Halt();
+            // 4. Universal CPU Triple Fault Reset (guaranteed hardware reset)
+            EarlySerial.WriteLine("[RESET] Triggering CPU Triple Fault reset...");
+            Cpu.TripleFaultReset();
+
+            // 5. Infinite Halt fallback
+            while (true)
+            {
+                Cpu.Halt();
+            }
         }
     }
 }
