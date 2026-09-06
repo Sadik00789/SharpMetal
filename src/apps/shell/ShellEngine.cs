@@ -6,21 +6,68 @@ namespace Shell
 {
     public static unsafe class ShellEngine
     {
+        public static bool MatchCommand(byte* buf, int len, string target)
+        {
+            if (len != target.Length) return false;
+            for (int i = 0; i < len; i++)
+            {
+                if (buf[i] != (byte)target[i]) return false;
+            }
+            return true;
+        }
+
+        public static bool StartsWithCommand(byte* buf, int len, string prefix)
+        {
+            if (len < prefix.Length) return false;
+            for (int i = 0; i < prefix.Length; i++)
+            {
+                if (buf[i] != (byte)prefix[i]) return false;
+            }
+            return true;
+        }
+
         public static void ExecuteCommand(string cmd, ref TerminalGrid grid)
         {
             if (cmd == null || cmd.Length == 0) return;
+            byte* buf = stackalloc byte[cmd.Length];
+            for (int i = 0; i < cmd.Length; i++)
+            {
+                buf[i] = (byte)cmd[i];
+            }
+            ExecuteCommand(buf, cmd.Length, ref grid);
+        }
 
-            if (cmd == "help")
+        public static void ExecuteCommand(byte* buf, int len, ref TerminalGrid grid)
+        {
+            if (buf == null || len == 0) return;
+
+            if (MatchCommand(buf, len, "help"))
             {
                 grid.WriteString("Available commands:\n");
-                grid.WriteString("  help  - Display this help message\n");
-                grid.WriteString("  pci   - Enumerate PCIe ECAM hardware devices\n");
-                grid.WriteString("  caps  - Inspect process CNode capability slots\n");
-                grid.WriteString("  ps    - Query active thread table and priorities\n");
-                grid.WriteString("  nvme  - Run NVMe block read/write benchmark\n");
-                grid.WriteString("  exit  - Shut down microkernel\n");
+                grid.WriteString("  help         - Display this help message\n");
+                grid.WriteString("  clear        - Clear terminal screen\n");
+                grid.WriteString("  pci          - Enumerate PCIe ECAM hardware devices\n");
+                grid.WriteString("  caps         - Inspect process CNode capability slots\n");
+                grid.WriteString("  ps           - Query active thread table and priorities\n");
+                grid.WriteString("  nvme         - Run NVMe block read/write benchmark\n");
+                grid.WriteString("  net          - Run VirtIO-Net network benchmark\n");
+                grid.WriteString("  cat <file>   - Read and display file from FAT32 volume\n");
+                grid.WriteString("  echo <text>  - Print text to terminal\n");
+                grid.WriteString("  exit         - Shut down microkernel\n");
             }
-            else if (cmd == "pci")
+            else if (MatchCommand(buf, len, "clear"))
+            {
+                grid.Initialize();
+            }
+            else if (StartsWithCommand(buf, len, "echo "))
+            {
+                for (int i = 5; i < len; i++)
+                {
+                    grid.WriteChar((char)buf[i]);
+                }
+                grid.WriteString("\n");
+            }
+            else if (MatchCommand(buf, len, "pci"))
             {
                 var pciClient = new PciServiceClient(endpointCptr: 6);
                 ulong nvmeBar = pciClient.FindDevice(0x01, 0x08);
@@ -33,7 +80,7 @@ namespace Shell
                 // Serial Token 6
                 SyscallWrappers.Log("[SHELL] Executing command: 'pci' -> Discovered 3 hardware devices.\n");
             }
-            else if (cmd == "caps")
+            else if (MatchCommand(buf, len, "caps"))
             {
                 grid.WriteString("[CAPS] CNode Capability Slots:\n");
                 grid.WriteString("  Slot 1: Root CNode Self (Read|Write|Grant)\n");
@@ -47,7 +94,7 @@ namespace Shell
                 grid.WriteString("  Slot 9: NVMe Storage Service Endpoint\n");
                 grid.WriteString("  Slot 10: Input Service Endpoint\n");
             }
-            else if (cmd == "ps")
+            else if (MatchCommand(buf, len, "ps"))
             {
                 grid.WriteString("[PS] Active Thread Table:\n");
                 grid.WriteString("  TID  PRIO  STATE    NAME\n");
@@ -59,7 +106,7 @@ namespace Shell
                 grid.WriteString("  6    1     READY    input.hid\n");
                 grid.WriteString("  7    2     RUNNING  shell\n");
             }
-            else if (cmd == "nvme")
+            else if (MatchCommand(buf, len, "nvme"))
             {
                 var storageClient = new BlockStorageServiceClient(endpointCptr: 9);
 
@@ -71,14 +118,14 @@ namespace Shell
 
                 SyscallWrappers.Log("[SHELL] Executing command: 'nvme' -> Block I/O benchmark passed.\n");
             }
-            else if (cmd.StartsWith("cat") || cmd == "cat /HELLO.TXT")
+            else if (StartsWithCommand(buf, len, "cat"))
             {
                 string text = System.IO.File.ReadAllText("/HELLO.TXT");
                 grid.WriteString("[VFS] Contents of /HELLO.TXT:\n  ");
                 grid.WriteString(text);
                 grid.WriteString("\n");
             }
-            else if (cmd == "net")
+            else if (MatchCommand(buf, len, "net"))
             {
                 var netClient = new NetworkServiceClient(endpointCptr: 12);
                 grid.WriteString("[NET] VirtIO-Net modern PCIe controller online.\n");
@@ -93,7 +140,6 @@ namespace Shell
                 byte* devMac = (byte*)(packetVirt + 512);
 
                 // Construct 64-byte Ethernet broadcast frame:
-                // 1. Destination MAC: FF:FF:FF:FF:FF:FF (Broadcast)
                 packetBuf[0] = 0xFF;
                 packetBuf[1] = 0xFF;
                 packetBuf[2] = 0xFF;
@@ -101,7 +147,6 @@ namespace Shell
                 packetBuf[4] = 0xFF;
                 packetBuf[5] = 0xFF;
 
-                // 2. Source MAC: device MAC
                 packetBuf[6] = devMac[0];
                 packetBuf[7] = devMac[1];
                 packetBuf[8] = devMac[2];
@@ -109,23 +154,20 @@ namespace Shell
                 packetBuf[10] = devMac[4];
                 packetBuf[11] = devMac[5];
 
-                // 3. EtherType: 0x88B5 (Local Experimental)
                 packetBuf[12] = 0x88;
                 packetBuf[13] = 0xB5;
 
-                // 4. Payload: 50 bytes of benchmark pattern
                 for (int i = 14; i < 64; i++)
                 {
                     packetBuf[i] = (byte)(0xA0 + (i - 14));
                 }
 
-                // Dispatch transmission via VirtIO TX ring
                 netClient.SendPacket(packetPhys, 64);
 
                 grid.WriteString("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
                 SyscallWrappers.Log("[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.\n");
             }
-            else if (cmd == "exit")
+            else if (MatchCommand(buf, len, "exit"))
             {
                 grid.WriteString("[SHELL] Shutting down system...\n");
                 SyscallWrappers.Log("[SUCCESS] Phase 10 fully operational. Exiting QEMU...\n");
@@ -134,7 +176,10 @@ namespace Shell
             else
             {
                 grid.WriteString("Unknown command: ");
-                grid.WriteString(cmd);
+                for (int i = 0; i < len; i++)
+                {
+                    grid.WriteChar((char)buf[i]);
+                }
                 grid.WriteString("\nType 'help' for available commands.\n");
             }
         }

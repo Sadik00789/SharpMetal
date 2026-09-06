@@ -10,7 +10,25 @@ namespace InputHid
     {
         public uint ReadKey()
         {
-            return Ps2Keyboard.ReadKey();
+            // 1. Check PS/2 Keyboard (both built-in keyboard and USB keyboard via SMM legacy emulation)
+            uint key = Ps2Keyboard.ReadKey();
+            if (key != 0) return key;
+
+            // 2. Check COM1 Serial Port (0x3F8) if character is waiting (e.g. QEMU / serial console)
+            if (HasSerialInput())
+            {
+                byte c = Ps2Keyboard.PortIn8(0x3F8);
+                if (c == '\r') return '\n';
+                if (c != 0) return c;
+            }
+
+            return 0;
+        }
+
+        private static bool HasSerialInput()
+        {
+            // COM1 Line Status Register (0x3FD): Bit 0 = Data Ready
+            return (Ps2Keyboard.PortIn8(0x3FD) & 0x01) != 0;
         }
     }
 

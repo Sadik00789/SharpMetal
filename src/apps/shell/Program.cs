@@ -34,6 +34,122 @@ namespace Shell
             SyscallWrappers.Yield();
         }
 
+        private static void NavigateHistory(
+            ref DisplayServiceClient displayClient,
+            ulong surfaceId,
+            byte* cmdBuffer,
+            ref int cmdLen,
+            ref int historyIndex,
+            int direction)
+        {
+            int total = TerminalHistory.Count;
+            if (total == 0) return;
+
+            int newIndex = historyIndex + direction;
+            if (newIndex < 0) newIndex = 0;
+            if (newIndex >= total) newIndex = total - 1;
+
+            byte* histEntry = stackalloc byte[128];
+            int entryLen = 0;
+            if (!TerminalHistory.TryGetEntry(newIndex, histEntry, out entryLen)) return;
+
+            historyIndex = newIndex;
+
+            // Erase current command from screen grid
+            while (cmdLen > 0)
+            {
+                Grid.WriteChar('\b');
+                cmdLen--;
+            }
+
+            // Copy entry into cmdBuffer and display
+            for (int i = 0; i < entryLen && i < 120; i++)
+            {
+                cmdBuffer[i] = histEntry[i];
+                Grid.WriteChar((char)histEntry[i]);
+            }
+            cmdLen = entryLen < 120 ? entryLen : 120;
+            cmdBuffer[cmdLen] = 0;
+
+            RenderAndCommit(ref displayClient, surfaceId);
+        }
+
+        public static void RunInteractiveLoop(ref DisplayServiceClient displayClient, ulong surfaceId)
+        {
+            var inputClient = new InputServiceClient(endpointCptr: 10);
+            byte* cmdBuffer = stackalloc byte[128];
+            int cmdLen = 0;
+            cmdBuffer[0] = 0;
+
+            int historyIndex = -1;
+
+            while (true)
+            {
+                uint key = inputClient.ReadKey();
+                if (key != 0)
+                {
+                    if (key == '\n' || key == '\r')
+                    {
+                        Grid.WriteChar('\n');
+                        cmdBuffer[cmdLen] = 0;
+
+                        if (cmdLen > 0)
+                        {
+                            TerminalHistory.Add(cmdBuffer, cmdLen);
+                            historyIndex = -1;
+
+                            ShellEngine.ExecuteCommand(cmdBuffer, cmdLen, ref Grid);
+                        }
+
+                        cmdLen = 0;
+                        cmdBuffer[0] = 0;
+                        Grid.WriteString("kernel:> ");
+                        RenderAndCommit(ref displayClient, surfaceId);
+                    }
+                    else if (key == '\b')
+                    {
+                        if (cmdLen > 0)
+                        {
+                            cmdLen--;
+                            cmdBuffer[cmdLen] = 0;
+                            Grid.WriteChar('\b');
+                            RenderAndCommit(ref displayClient, surfaceId);
+                        }
+                    }
+                    else if (key == 0x1B) // Escape or ANSI escape prefix
+                    {
+                        uint next1 = inputClient.ReadKey();
+                        if (next1 == '[')
+                        {
+                            uint next2 = inputClient.ReadKey();
+                            if (next2 == 'A') // Up Arrow: Previous command
+                            {
+                                NavigateHistory(ref displayClient, surfaceId, cmdBuffer, ref cmdLen, ref historyIndex, 1);
+                            }
+                            else if (next2 == 'B') // Down Arrow: Next command
+                            {
+                                NavigateHistory(ref displayClient, surfaceId, cmdBuffer, ref cmdLen, ref historyIndex, -1);
+                            }
+                        }
+                    }
+                    else if (key >= 32 && key <= 126) // Printable ASCII
+                    {
+                        if (cmdLen < 120)
+                        {
+                            cmdBuffer[cmdLen++] = (byte)key;
+                            cmdBuffer[cmdLen] = 0;
+                            Grid.WriteChar((char)key);
+                            RenderAndCommit(ref displayClient, surfaceId);
+                        }
+                    }
+                }
+                else
+                {
+                    SyscallWrappers.Yield();
+                }
+            }
+        }
+
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ShellMain")]
         public static void Main()
         {
@@ -113,10 +229,13 @@ namespace Shell
             // 13. Execute 'exit' command -> SysExit(0) -> QEMU exit 33
             ShellEngine.ExecuteCommand("exit", ref Grid);
 
-            while (true)
-            {
-                SyscallWrappers.Yield();
-            }
+            // 14. On bare metal, SysExit(0) returns because port 0xF4 is not an exit device.
+            // Transition smoothly into Interactive Graphic Shell!
+            Grid.WriteString("\n[SHELL] Interactive mode online. Type 'help' for commands.\n");
+            Grid.WriteString("kernel:> ");
+            RenderAndCommit(ref displayClient, surfaceId);
+
+            RunInteractiveLoop(ref displayClient, surfaceId);
         }
     }
 }

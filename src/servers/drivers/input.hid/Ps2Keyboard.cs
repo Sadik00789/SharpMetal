@@ -21,20 +21,80 @@ namespace InputHid
         private static byte s_pending0 = 0;
         private static byte s_pending1 = 0;
 
+        private static void WaitInputEmpty()
+        {
+            int timeout = 50000;
+            while ((PortIn8(StatusPort) & 2) != 0 && timeout-- > 0)
+            {
+            }
+        }
+
+        private static void WaitOutputFull()
+        {
+            int timeout = 50000;
+            while ((PortIn8(StatusPort) & 1) == 0 && timeout-- > 0)
+            {
+            }
+        }
+
         public static void Initialize()
         {
-            // Flush any residual bytes in PS/2 buffer
+            s_shiftDown = false;
+            s_capsLock = false;
+            s_extended = false;
+            s_pending0 = 0;
+            s_pending1 = 0;
+
+            // 1. Drain residual bytes in PS/2 buffer
             int maxFlush = 128;
             while ((PortIn8(StatusPort) & 1) != 0 && maxFlush-- > 0)
             {
                 PortIn8(DataPort);
             }
 
-            s_shiftDown = false;
-            s_capsLock = false;
-            s_extended = false;
-            s_pending0 = 0;
-            s_pending1 = 0;
+            // 2. Enable first PS/2 keyboard port (Command 0xAE to StatusPort)
+            WaitInputEmpty();
+            PortOut8(StatusPort, 0xAE);
+
+            // 3. Read Controller Command Byte (Command 0x20)
+            WaitInputEmpty();
+            PortOut8(StatusPort, 0x20);
+            WaitOutputFull();
+            byte config = PortIn8(DataPort);
+
+            // Bit 0: First port interrupt (1 = enabled)
+            // Bit 4: First port clock (0 = enabled)
+            // Bit 6: Translation (1 = enabled, translates Set 2 to Set 1)
+            config |= 0x01;
+            config &= 0xEF;
+            config |= 0x40;
+
+            WaitInputEmpty();
+            PortOut8(StatusPort, 0x60); // Command 0x60: Write Controller Command Byte
+            WaitInputEmpty();
+            PortOut8(DataPort, config);
+
+            // 4. Enable Keyboard Scanning (Command 0xF4 to DataPort)
+            WaitInputEmpty();
+            PortOut8(DataPort, 0xF4);
+
+            // Wait for ACK (0xFA)
+            int ackTimeout = 50000;
+            while (ackTimeout-- > 0)
+            {
+                if ((PortIn8(StatusPort) & 1) != 0)
+                {
+                    byte resp = PortIn8(DataPort);
+                    if (resp == 0xFA) break;
+                }
+            }
+
+            // Flush any remaining response bytes
+            maxFlush = 32;
+            while ((PortIn8(StatusPort) & 1) != 0 && maxFlush-- > 0)
+            {
+                PortIn8(DataPort);
+            }
 
             // Serial Token 4
             SyscallWrappers.Log("[INPUT] PS/2 keyboard controller online.\n");
@@ -51,12 +111,25 @@ namespace InputHid
             }
 
             // Check if output buffer full
-            if ((PortIn8(StatusPort) & 1) == 0)
+            byte status = PortIn8(StatusPort);
+            if ((status & 1) == 0)
             {
                 return 0; // No key available
             }
 
             byte sc = PortIn8(DataPort);
+
+            // Filter out auxiliary / mouse data (bit 5 of status port is set)
+            if ((status & 0x20) != 0)
+            {
+                return 0;
+            }
+
+            // Filter out ACK / Resend / Echo / Error bytes
+            if (sc == 0xFA || sc == 0xFE || sc == 0xEE || sc == 0xFF || sc == 0x00)
+            {
+                return 0;
+            }
 
             // Extended scancode prefix
             if (sc == 0xE0)
@@ -82,6 +155,20 @@ namespace InputHid
                 {
                     s_pending0 = (byte)'[';
                     s_pending1 = (byte)'B';
+                    return 0x1B;
+                }
+                // Left Arrow: 0xE0 0x4B -> \x1b[D
+                if (sc == 0x4B)
+                {
+                    s_pending0 = (byte)'[';
+                    s_pending1 = (byte)'D';
+                    return 0x1B;
+                }
+                // Right Arrow: 0xE0 0x4D -> \x1b[C
+                if (sc == 0x4D)
+                {
+                    s_pending0 = (byte)'[';
+                    s_pending1 = (byte)'C';
                     return 0x1B;
                 }
                 return 0;
