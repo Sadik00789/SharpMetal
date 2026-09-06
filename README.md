@@ -1,5 +1,7 @@
-# Bare-Metal C# x86-64 Microkernel
+# SharpMetal: Bare-Metal C# x86-64 Microkernel
 
+[![CI](https://github.com/sadik00789/SharpMetal/actions/workflows/test-qemu.yml/badge.svg)](https://github.com/sadik00789/SharpMetal/actions)
+[![Release](https://img.shields.io/github/v/release/sadik00789/SharpMetal?color=brightgreen)](https://github.com/sadik00789/SharpMetal/releases/latest)
 [![Architecture](https://img.shields.io/badge/Architecture-x86--64-blue.svg)](https://en.wikipedia.org/wiki/X86-64)
 [![Runtime](https://img.shields.io/badge/.NET%209-Native%20AOT%20Freestanding-512BD4.svg)](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
 [![Firmware](https://img.shields.io/badge/Firmware-UEFI%202.x%20Direct-brightgreen.svg)](https://uefi.org/)
@@ -172,10 +174,10 @@ Inter-process communication between isolated Ring 3 servers uses the Roslyn sour
 public interface IBlockStorageService
 {
     [RpcMethod(1)]
-    ulong ReadBlock(ulong lba, ulong shmPhysOrVirt);
+    ulong ReadBlock(ulong lba, ulong shmCptr);
 
     [RpcMethod(2)]
-    ulong WriteBlock(ulong lba, ulong shmPhysOrVirt);
+    ulong WriteBlock(ulong lba, ulong shmCptr);
 }
 ```
 
@@ -204,8 +206,29 @@ Avx2Blit:
 
 ## Getting Started
 
+### Quick Test Drive (Pre-built Release)
+To run the microkernel immediately without compiling the source code:
+
+```bash
+# 1. Download pre-built disk image
+curl -LO [https://github.com/sadik00789/SharpMetal/releases/download/v1.0.0/disk.img](https://github.com/sadik00789/SharpMetal/releases/download/v1.0.0/disk.img)
+
+# 2. Create backing image for NVMe benchmark storage
+qemu-img create -f raw nvme.img 64M
+
+# 3. Launch QEMU (Universal / Emulated AVX2)
+qemu-system-x86_64 -machine q35 -cpu max -m 1G \
+  -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
+  -drive file=disk.img,format=raw \
+  -drive file=nvme.img,format=raw,if=none,id=nvm \
+  -device nvme,serial=nvme01,drive=nvm \
+  -netdev user,id=net0 -device virtio-net-pci,netdev=net0
+```
+
+---
+
 ### Prerequisites
-Ensure your host build system (Linux x86-64) has the following packages installed:
+To build the microkernel from source, ensure your host build system (Linux x86-64) has the following packages installed:
 
 ```bash
 # Ubuntu / Debian
@@ -237,19 +260,25 @@ Launch the microkernel under QEMU with UEFI firmware, NVMe emulation, and serial
 bash build/scripts/Run-Qemu.sh
 ```
 
+> **Tip (Display Mode):** `Run-Qemu.sh` defaults to `-display none` for clean headless execution and CI logging. To view the live AVX2 graphical desktop window directly on your screen, run:
+> ```bash
+> bash build/scripts/Run-Qemu.sh -display default
+> # or: -display gtk / -display sdl
+> ```
+
 ### 3. Run Automated End-to-End Test Suite
 Execute the automated regression harness:
 ```bash
 python3 build/scripts/Test-Harness.py
 ```
-The test harness compiles the system, launches QEMU under an automated 8-second timeout, verifies all 8 sequential milestone tokens over serial output, and validates the `0x10` exit status code via `isa-debug-exit` (exit code 33).
+The test harness compiles the system, launches QEMU under an automated timeout, verifies all 8 sequential milestone tokens over serial output, and validates the `0x10` exit status code via `isa-debug-exit` (exit code 33).
 
 ### 4. Record High-Resolution Demo GIF
 Generate an optimized, palette-quantized boot demonstration GIF:
 ```bash
 python3 build/scripts/Record-Demo.py
 ```
-This script launches headless QEMU with a UNIX monitor socket, captures screendump PPM frames every 150ms, holds the final terminal screen for 3.0 seconds (30 duplicated frames), and compiles `docs/assets/demo.gif` using `ffmpeg` with lanczos scaling and palette optimization.
+This script launches headless QEMU with a UNIX monitor socket, captures screendump PPM frames every 150ms, holds the final terminal screen for 3.0 seconds, and compiles `docs/assets/demo.gif` using `ffmpeg` with lanczos scaling and palette optimization.
 
 ### 5. Safe Bare-Metal USB Deployment
 Flash a bootable UEFI drive for physical bare-metal hardware testing:
