@@ -321,20 +321,14 @@ namespace Kernel.Scheduling
 
                     if (CurrentThread->State == ThreadState.Running)
                     {
-                        CurrentThread->State = ThreadState.Ready;
-                        EnqueueThread(CurrentThread);
+                        // Timeslice expired: do not ContextSwitch inside ISR stack
+                        // Thread will yield on next cooperative check
                     }
-
-                    ScheduleLocked();
                 }
             }
             else if (CurrentThread == IdleThread)
             {
-                // If currently running idle thread, check if any ready threads exist
-                if (!s_q0.IsEmpty || !s_q1.IsEmpty || !s_q2.IsEmpty || !s_q3.IsEmpty)
-                {
-                    ScheduleLocked();
-                }
+                // IdleThread yields cooperatively in its own loop
             }
         }
 
@@ -424,7 +418,14 @@ namespace Kernel.Scheduling
             while (true)
             {
                 Cpu.EnableInterrupts();
-                PortIo.IoWait();
+                if (!s_q0.IsEmpty || !s_q1.IsEmpty || !s_q2.IsEmpty || !s_q3.IsEmpty)
+                {
+                    Yield();
+                }
+                else
+                {
+                    PortIo.IoWait();
+                }
             }
         }
 

@@ -8,10 +8,12 @@ namespace Kernel.Memory.Virtual
     {
         public static ulong Pml4PhysicalAddress { get; private set; }
 
+        public const int NumPds = 16; // 16 x 1 GiB = 16 GiB covered
+
         public static ulong CreateKernelSpace(ulong* pageTableMemory, ulong gopFbPhys, ulong gopFbSize)
         {
-            // Zero 13 pages (53,248 bytes = 6,656 ulongs)
-            ulong totalWords = (13 * 4096) / sizeof(ulong);
+            // Zero 38 pages (155,648 bytes)
+            ulong totalWords = (38 * 4096) / sizeof(ulong);
             for (ulong i = 0; i < totalWords; i++)
             {
                 pageTableMemory[i] = 0;
@@ -19,63 +21,46 @@ namespace Kernel.Memory.Virtual
 
             ulong basePhys = (ulong)pageTableMemory;
 
+            // Layout:
+            // Page 0: PML4
+            // Page 1: Identity PDPT
+            // Pages 2..17: Identity PDs (16 pages)
+            // Page 18: HHDM PDPT
+            // Pages 19..34: HHDM PDs (16 pages)
+            // Page 35: KernelHigh PDPT
+            // Page 36: KernelHigh PD
+
             ulong* pml4 = pageTableMemory + (0 * 512);
             ulong* idPdpt = pageTableMemory + (1 * 512);
-            ulong* idPd0 = pageTableMemory + (2 * 512);
-            ulong* idPd1 = pageTableMemory + (3 * 512);
-            ulong* idPd2 = pageTableMemory + (4 * 512);
-            ulong* idPd3 = pageTableMemory + (5 * 512);
-
-            ulong* hhdmPdpt = pageTableMemory + (6 * 512);
-            ulong* hhdmPd0 = pageTableMemory + (7 * 512);
-            ulong* hhdmPd1 = pageTableMemory + (8 * 512);
-            ulong* hhdmPd2 = pageTableMemory + (9 * 512);
-            ulong* hhdmPd3 = pageTableMemory + (10 * 512);
-
-            ulong* kernelHighPdpt = pageTableMemory + (11 * 512);
-            ulong* kernelHighPd = pageTableMemory + (12 * 512);
+            ulong* hhdmPdpt = pageTableMemory + (18 * 512);
+            ulong* kernelHighPdpt = pageTableMemory + (35 * 512);
+            ulong* kernelHighPd = pageTableMemory + (36 * 512);
 
             ulong idPdptPhys = basePhys + (1 * 4096);
-            ulong idPd0Phys = basePhys + (2 * 4096);
-            ulong idPd1Phys = basePhys + (3 * 4096);
-            ulong idPd2Phys = basePhys + (4 * 4096);
-            ulong idPd3Phys = basePhys + (5 * 4096);
+            ulong hhdmPdptPhys = basePhys + (18 * 4096);
+            ulong kernelHighPdptPhys = basePhys + (35 * 4096);
+            ulong kernelHighPdPhys = basePhys + (36 * 4096);
 
-            ulong hhdmPdptPhys = basePhys + (6 * 4096);
-            ulong hhdmPd0Phys = basePhys + (7 * 4096);
-            ulong hhdmPd1Phys = basePhys + (8 * 4096);
-            ulong hhdmPd2Phys = basePhys + (9 * 4096);
-            ulong hhdmPd3Phys = basePhys + (10 * 4096);
-
-            ulong kernelHighPdptPhys = basePhys + (11 * 4096);
-            ulong kernelHighPdPhys = basePhys + (12 * 4096);
-
-            // 1. Identity Mapping (PML4[0] -> idPdpt)
+            // 1. PML4 Links
             pml4[0] = idPdptPhys | Paging.Present | Paging.Writable;
-            idPdpt[0] = idPd0Phys | Paging.Present | Paging.Writable;
-            idPdpt[1] = idPd1Phys | Paging.Present | Paging.Writable;
-            idPdpt[2] = idPd2Phys | Paging.Present | Paging.Writable;
-            idPdpt[3] = idPd3Phys | Paging.Present | Paging.Writable;
-
-            // 2. HHDM (PML4[256] -> hhdmPdpt, covering 0xFFFF_8000_0000_0000)
             pml4[256] = hhdmPdptPhys | Paging.Present | Paging.Writable;
-            hhdmPdpt[0] = hhdmPd0Phys | Paging.Present | Paging.Writable;
-            hhdmPdpt[1] = hhdmPd1Phys | Paging.Present | Paging.Writable;
-            hhdmPdpt[2] = hhdmPd2Phys | Paging.Present | Paging.Writable;
-            hhdmPdpt[3] = hhdmPd3Phys | Paging.Present | Paging.Writable;
-
-            // 3. Kernel High Space (PML4[511] -> kernelHighPdpt, covering 0xFFFF_FFFF_8000_0000)
             pml4[511] = kernelHighPdptPhys | Paging.Present | Paging.Writable;
-            // 0xFFFFFFFF80000000: PDPT index 510
+
+            // Kernel high space (0xFFFFFFFF80000000: PDPT index 510)
             kernelHighPdpt[510] = kernelHighPdPhys | Paging.Present | Paging.Writable;
 
-            // Populate Page Directories: 4 x 512 x 2 MiB = 4 GiB
             ulong gopFbEnd = gopFbPhys + gopFbSize;
 
-            for (int pdIdx = 0; pdIdx < 4; pdIdx++)
+            // 2. Populate 16 Identity and 16 HHDM Page Directories (16 GiB total)
+            for (int pdIdx = 0; pdIdx < NumPds; pdIdx++)
             {
-                ulong* curIdPd = (pdIdx == 0) ? idPd0 : (pdIdx == 1) ? idPd1 : (pdIdx == 2) ? idPd2 : idPd3;
-                ulong* curHhdmPd = (pdIdx == 0) ? hhdmPd0 : (pdIdx == 1) ? hhdmPd1 : (pdIdx == 2) ? hhdmPd2 : hhdmPd3;
+                ulong idPdPhys = basePhys + ((2 + (ulong)pdIdx) * 4096);
+                ulong* curIdPd = pageTableMemory + ((2 + pdIdx) * 512);
+                idPdpt[pdIdx] = idPdPhys | Paging.Present | Paging.Writable;
+
+                ulong hhdmPdPhys = basePhys + ((19 + (ulong)pdIdx) * 4096);
+                ulong* curHhdmPd = pageTableMemory + ((19 + pdIdx) * 512);
+                hhdmPdpt[pdIdx] = hhdmPdPhys | Paging.Present | Paging.Writable;
 
                 for (int entryIdx = 0; entryIdx < 512; entryIdx++)
                 {
@@ -86,13 +71,13 @@ namespace Kernel.Memory.Virtual
                     ulong pageEnd = phys + Paging.PageSize2M;
                     if (gopFbSize > 0 && phys < gopFbEnd && pageEnd > gopFbPhys)
                     {
-                        flags |= Paging.Pat2M; // Bit 12 = PAT for 2MB pages
+                        flags |= Paging.Pat2M;
                     }
 
                     curIdPd[entryIdx] = phys | flags;
                     curHhdmPd[entryIdx] = phys | flags;
 
-                    // Also map first 1 GiB to kernel high space (PDPT[510])
+                    // Map first 1 GiB to kernel high space
                     if (pdIdx == 0 && entryIdx < 512)
                     {
                         kernelHighPd[entryIdx] = phys | flags;
@@ -119,7 +104,6 @@ namespace Kernel.Memory.Virtual
             int pdIdx   = Paging.GetPdIndex(virt);
             int ptIdx   = Paging.GetPtIndex(virt);
 
-            // 1. PML4 -> PDPT
             ulong* pdpt;
             if ((pml4[pml4Idx] & Paging.Present) == 0)
             {
@@ -135,7 +119,6 @@ namespace Kernel.Memory.Virtual
                 pdpt = (ulong*)Hhdm.PhysicalToVirtual(pdptPhys);
             }
 
-            // 2. PDPT -> PD
             ulong* pd;
             if ((pdpt[pdptIdx] & Paging.Present) == 0)
             {
@@ -151,7 +134,6 @@ namespace Kernel.Memory.Virtual
                 pd = (ulong*)Hhdm.PhysicalToVirtual(pdPhys);
             }
 
-            // 3. PD -> PT
             ulong* pt;
             if ((pd[pdIdx] & Paging.Present) == 0)
             {
@@ -167,7 +149,6 @@ namespace Kernel.Memory.Virtual
                 pt = (ulong*)Hhdm.PhysicalToVirtual(ptPhys);
             }
 
-            // 4. PT -> Leaf physical page
             pt[ptIdx] = (phys & Paging.AddressMask) | flags;
         }
 
@@ -180,25 +161,21 @@ namespace Kernel.Memory.Virtual
             ulong userStackSize,
             out ulong userStackTop)
         {
-            // 1. Allocate dedicated 4 KiB frame for user PML4
             ulong userPml4Phys = PageFrameAllocator.AllocateFrame();
             ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
             ZeroPage(userPml4);
 
-            // 2. Mirror supervisor higher-half (entries 256..511) from kernel PML4 (U/S = 0)
             ulong* kernelPml4 = (ulong*)Hhdm.PhysicalToVirtual(kernelPml4Phys);
             for (int i = 256; i < 512; i++)
             {
                 userPml4[i] = kernelPml4[i];
             }
 
-            // 3. Map binary payload at entryVirt (0x40000000)
-            if (payloadSize > 0x40 && payload[0] == 0x4D && payload[1] == 0x5A) // 'M', 'Z'
+            if (payloadSize > 0x40 && payload[0] == 0x4D && payload[1] == 0x5A)
             {
                 uint e_lfanew = *(uint*)(payload + 0x3C);
-                if (e_lfanew < payloadSize && *(uint*)(payload + e_lfanew) == 0x00004550) // 'P', 'E', 0, 0
+                if (e_lfanew < payloadSize && *(uint*)(payload + e_lfanew) == 0x00004550)
                 {
-                    // Map headers (first page at entryVirt)
                     ulong hdrFramePhys = PageFrameAllocator.AllocateFrame();
                     byte* hdrFrameVirt = (byte*)Hhdm.PhysicalToVirtual(hdrFramePhys);
                     ZeroPage((ulong*)hdrFrameVirt);
@@ -246,7 +223,6 @@ namespace Kernel.Memory.Virtual
             }
             else
             {
-                // Flat binary fallback
                 ulong pagesNeeded = (payloadSize + 4095) / 4096;
                 for (ulong p = 0; p < pagesNeeded; p++)
                 {
@@ -266,7 +242,6 @@ namespace Kernel.Memory.Virtual
                 }
             }
 
-            // 4. Map user stack at userStackVirt (0x00007FFFF0000000, 16 KiB = 4 pages)
             ulong stackPages = (userStackSize + 4095) / 4096;
             for (ulong s = 0; s < stackPages; s++)
             {
@@ -278,9 +253,7 @@ namespace Kernel.Memory.Virtual
                 MapUserPage4K(userPml4, pageVirt, stackPhys, Paging.Present | Paging.Writable | Paging.User);
             }
 
-            // 16-byte aligned user stack top
             userStackTop = (userStackVirt + userStackSize - 32) & ~15UL;
-
             return userPml4Phys;
         }
 
@@ -291,25 +264,15 @@ namespace Kernel.Memory.Virtual
                 userPml4Phys = Pml4PhysicalAddress;
             }
 
-            // Constraint 4: Page-align both physAddr and virtAddr (& ~0xFFFUL) and round up sizeBytes to 4096-byte boundaries
             ulong alignedPhys = physAddr & ~0xFFFUL;
             ulong alignedVirt = virtAddr & ~0xFFFUL;
             ulong pageOffset = physAddr & 0xFFFUL;
             ulong alignedSize = (sizeBytes + pageOffset + 0xFFFUL) & ~0xFFFUL;
-            if (alignedSize == 0)
-            {
-                alignedSize = 4096;
-            }
+            if (alignedSize == 0) alignedSize = 4096;
 
             ulong flags = Paging.Present | Paging.Writable | Paging.User;
-            if (writeCombining)
-            {
-                flags |= Paging.Pat4K; // PAT index 4: PAT=1, PCD=0, PWT=0 (Write-Combining)
-            }
-            else
-            {
-                flags |= Paging.CacheDisable; // PCD=1 (Uncacheable)
-            }
+            if (writeCombining) flags |= Paging.Pat4K;
+            else flags |= Paging.CacheDisable;
 
             ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
             bool isCurrentCr3 = Cpu.ReadCr3() == userPml4Phys;
@@ -323,7 +286,6 @@ namespace Kernel.Memory.Virtual
                 }
             }
 
-            // Invalidate TLB if modifying current CR3
             if (isCurrentCr3)
             {
                 Cpu.WriteCr3(userPml4Phys);
@@ -349,7 +311,6 @@ namespace Kernel.Memory.Virtual
             ulong ptIdx   = (virtAddr >> 12) & 0x1FF;
             ulong pageOff = virtAddr & 0xFFF;
 
-            // Translate physical PML4 to HHDM virtual pointer
             ulong* pml4 = (ulong*)(Hhdm.Base + (pml4Phys & ~0xFFFUL));
             if ((pml4[pml4Idx] & Paging.Present) == 0) return 0;
 
@@ -359,7 +320,6 @@ namespace Kernel.Memory.Virtual
             ulong* pd = (ulong*)(Hhdm.Base + (pdpt[pdptIdx] & ~0xFFFUL & 0x000F_FFFF_FFFF_F000UL));
             if ((pd[pdIdx] & Paging.Present) == 0) return 0;
 
-            // Handle 2MB large page if PS bit is set
             if ((pd[pdIdx] & 0x80) != 0)
             {
                 return (pd[pdIdx] & ~0x1FFFFFUL) | (virtAddr & 0x1FFFFFUL);

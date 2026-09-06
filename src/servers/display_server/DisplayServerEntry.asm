@@ -18,7 +18,8 @@ DisplayServerEntry:
     add rsp, 32
 
 .halt:
-    hlt
+    mov rcx, 1
+    call Syscall
     jmp .halt
 
 ; -----------------------------------------------------------------------------

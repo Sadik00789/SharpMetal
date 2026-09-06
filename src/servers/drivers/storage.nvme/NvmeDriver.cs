@@ -82,10 +82,12 @@ namespace StorageNvme
                 {
                     bar0Phys = pciClient.FindDevice(0x1B36, 0x0010);
                 }
-                if (bar0Phys == 0)
-                {
-                    bar0Phys = 0xFEB80000UL; // Standard QEMU Q35 NVMe MMIO fallback
-                }
+            }
+
+            if (bar0Phys == 0)
+            {
+                SyscallWrappers.Log("[NVME] No NVMe storage controller found on PCI bus.\n");
+                return;
             }
 
             // 2. Map NVMe MMIO registers into userland (16 KiB)
@@ -246,6 +248,8 @@ namespace StorageNvme
 
         public static ulong ReadBlock(ulong lba, ulong shmPhysOrVirt)
         {
+            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
+
             uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
             uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
 
@@ -278,6 +282,8 @@ namespace StorageNvme
 
         public static ulong WriteBlock(ulong lba, ulong shmPhysOrVirt)
         {
+            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
+
             uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
             uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
 

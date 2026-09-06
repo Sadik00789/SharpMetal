@@ -51,67 +51,72 @@ namespace Roottask
             KernelBootInfo bootInfo = default;
             SyscallWrappers.GetBootInfo(&bootInfo);
 
-            // Constraint 1: Userland MMIO Mapping for Boot Structures
-            // Map RsdpPhysBase and InitrdPhysBase into lower-half user address space before reading them.
-            ulong rsdpVirtBase = 0x50000000UL;
-            SyscallWrappers.MapMmio(bootInfo.RsdpPhysBase, rsdpVirtBase, 4096, writeCombining: false);
-            ulong rsdpVirt = rsdpVirtBase + (bootInfo.RsdpPhysBase & 0xFFFUL);
+            ulong mcfgBase = 0;
 
+            // Constraint 1: Userland MMIO Mapping for Boot Structures
             ulong initrdVirtBase = 0x60000000UL;
             SyscallWrappers.MapMmio(bootInfo.InitrdPhysBase, initrdVirtBase, bootInfo.InitrdSize, writeCombining: false);
             ulong initrdVirt = initrdVirtBase + (bootInfo.InitrdPhysBase & 0xFFFUL);
 
             // 2. Parse RSDP to locate Root System Description Table (XSDT / RSDT)
-            byte* rsdp = (byte*)rsdpVirt;
-            byte revision = rsdp[15];
-            ulong rootTablePhys = 0;
-            if (revision >= 2)
+            if (bootInfo.RsdpPhysBase != 0)
             {
-                rootTablePhys = *(ulong*)(rsdp + 24); // XsdtAddress
-            }
-            if (rootTablePhys == 0)
-            {
-                rootTablePhys = *(uint*)(rsdp + 16);  // RsdtAddress
-            }
+                ulong rsdpVirtBase = 0x50000000UL;
+                SyscallWrappers.MapMmio(bootInfo.RsdpPhysBase, rsdpVirtBase, 4096, writeCombining: false);
+                ulong rsdpVirt = rsdpVirtBase + (bootInfo.RsdpPhysBase & 0xFFFUL);
 
-            ulong rootTableVirtBase = 0x50010000UL;
-            SyscallWrappers.MapMmio(rootTablePhys, rootTableVirtBase, 4096, writeCombining: false);
-            ulong rootTableVirt = rootTableVirtBase + (rootTablePhys & 0xFFFUL);
-
-            byte* rootTable = (byte*)rootTableVirt;
-            uint length = *(uint*)(rootTable + 4);
-
-            // Constraint 2: ACPI Table Pointer Strides
-            // Inspect root table signature: read 8-byte entries if "XSDT", and 4-byte entries if "RSDT".
-            bool isXsdt = (rootTable[0] == 'X' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
-            int entryStride = isXsdt ? 8 : 4;
-            int numEntries = (int)((length - 36) / (uint)entryStride);
-
-            ulong mcfgBase = 0;
-            ulong tempTableVirtBase = 0x50020000UL;
-
-            for (int i = 0; i < numEntries; i++)
-            {
-                ulong tablePhys;
-                if (isXsdt)
+                byte* rsdp = (byte*)rsdpVirt;
+                if (rsdp[0] == 'R' && rsdp[1] == 'S' && rsdp[2] == 'D' && rsdp[3] == ' ' &&
+                    rsdp[4] == 'P' && rsdp[5] == 'T' && rsdp[6] == 'R' && rsdp[7] == ' ')
                 {
-                    tablePhys = *(ulong*)(rootTable + 36 + (i * 8));
-                }
-                else
-                {
-                    tablePhys = *(uint*)(rootTable + 36 + (i * 4));
-                }
+                    byte revision = rsdp[15];
+                    ulong rootTablePhys = 0;
+                    if (revision >= 2)
+                    {
+                        rootTablePhys = *(ulong*)(rsdp + 24); // XsdtAddress
+                    }
+                    if (rootTablePhys == 0)
+                    {
+                        rootTablePhys = *(uint*)(rsdp + 16);  // RsdtAddress
+                    }
 
-                if (tablePhys == 0) continue;
+                    if (rootTablePhys != 0)
+                    {
+                        ulong rootTableVirtBase = 0x50010000UL;
+                        SyscallWrappers.MapMmio(rootTablePhys, rootTableVirtBase, 8192, writeCombining: false);
+                        ulong rootTableVirt = rootTableVirtBase + (rootTablePhys & 0xFFFUL);
 
-                SyscallWrappers.MapMmio(tablePhys, tempTableVirtBase, 4096, writeCombining: false);
-                byte* table = (byte*)(tempTableVirtBase + (tablePhys & 0xFFFUL));
+                        byte* rootTable = (byte*)rootTableVirt;
+                        bool isXsdt = (rootTable[0] == 'X' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
+                        bool isRsdt = (rootTable[0] == 'R' && rootTable[1] == 'S' && rootTable[2] == 'D' && rootTable[3] == 'T');
 
-                if (table[0] == 'M' && table[1] == 'C' && table[2] == 'F' && table[3] == 'G')
-                {
-                    // MCFG configuration base address allocation structure at offset 44
-                    mcfgBase = *(ulong*)(table + 44);
-                    break;
+                        if (isXsdt || isRsdt)
+                        {
+                            uint length = *(uint*)(rootTable + 4);
+                            if (length >= 36 && length <= 65536)
+                            {
+                                int entryStride = isXsdt ? 8 : 4;
+                                int numEntries = (int)((length - 36) / (uint)entryStride);
+                                if (numEntries > 128) numEntries = 128;
+
+                                ulong tempTableVirtBase = 0x50020000UL;
+                                for (int i = 0; i < numEntries; i++)
+                                {
+                                    ulong tablePhys = isXsdt ? *(ulong*)(rootTable + 36 + (i * 8)) : *(uint*)(rootTable + 36 + (i * 4));
+                                    if (tablePhys == 0) continue;
+
+                                    SyscallWrappers.MapMmio(tablePhys, tempTableVirtBase, 4096, writeCombining: false);
+                                    byte* table = (byte*)(tempTableVirtBase + (tablePhys & 0xFFFUL));
+
+                                    if (table[0] == 'M' && table[1] == 'C' && table[2] == 'F' && table[3] == 'G')
+                                    {
+                                        mcfgBase = *(ulong*)(table + 44);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

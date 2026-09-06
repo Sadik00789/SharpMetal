@@ -59,6 +59,20 @@ namespace Kernel.Arch.x86_64.Hardware
             // Check privilege level: Ring 3 (CPL = 3) vs Ring 0 (Kernel)
             if ((ctx->Cs & 3) == 3)
             {
+                // Visual Ring 3 Exception Diagnostic on Framebuffer
+                if (Kernel.Boot.KernelHigh.GopPhysBase != 0)
+                {
+                    uint* fb = (uint*)Kernel.Memory.Virtual.Hhdm.PhysicalToVirtual(Kernel.Boot.KernelHigh.GopPhysBase);
+                    ulong w = Kernel.Boot.KernelHigh.GopWidth;
+                    // Orange Top Banner (scanlines 0..20)
+                    for (ulong i = 0; i < w * 20; i++) fb[i] = 0xFFFF5500;
+                    // Indicator block: Yellow if #PF (14), White if #GP (13), Cyan if #UD (6), Magenta otherwise
+                    uint indColor = (ctx->Vector == 14) ? 0xFFFFFF00 : (ctx->Vector == 13) ? 0xFFFFFFFF : (ctx->Vector == 6) ? 0xFF00FFFF : 0xFFFF00FF;
+                    for (ulong y = 25; y < 50; y++) {
+                        for (ulong x = 0; x < 150; x++) fb[y * w + x] = indColor;
+                    }
+                }
+
                 EarlySerial.Write("[FAULT] Ring 3 Exception Vector: ");
                 EarlySerial.WriteHex(ctx->Vector);
                 EarlySerial.Write(" ErrorCode: ");
@@ -72,6 +86,15 @@ namespace Kernel.Arch.x86_64.Hardware
                 var current = Kernel.Scheduling.Scheduler.CurrentThread;
                 if (current != null)
                 {
+                    // If roottask (TID 1) faults, system cannot recover: halt CPU so diagnosis is preserved on screen
+                    if (current->Id <= 1)
+                    {
+                        while (true)
+                        {
+                            Cpu.DisableInterrupts();
+                        }
+                    }
+
                     current->State = Kernel.Scheduling.ThreadState.Dead;
 
                     // If CurrentThread->CSpaceRoot contains a supervisor capability at Slot 8, signal it
@@ -94,6 +117,20 @@ namespace Kernel.Arch.x86_64.Hardware
             }
 
             // Kernel-mode unhandled exception report (halt CPU)
+                        // Visual Kernel Panic on Framebuffer
+            if (Kernel.Boot.KernelHigh.GopPhysBase != 0)
+            {
+                uint* fb = (uint*)Kernel.Memory.Virtual.Hhdm.PhysicalToVirtual(Kernel.Boot.KernelHigh.GopPhysBase);
+                ulong w = Kernel.Boot.KernelHigh.GopWidth;
+                // Bright Red Top Banner (scanlines 0..20)
+                for (ulong i = 0; i < w * 20; i++) fb[i] = 0xFFFF0000;
+                // Yellow indicator block (width 100px) if vector == 14 (#PF), White if vector == 13 (#GP)
+                uint indColor = (ctx->Vector == 14) ? 0xFFFFFF00 : (ctx->Vector == 13) ? 0xFFFFFFFF : 0xFF00FFFF;
+                for (ulong y = 25; y < 50; y++) {
+                    for (ulong x = 0; x < 150; x++) fb[y * w + x] = indColor;
+                }
+            }
+
             EarlySerial.Write("[FAULT] Kernel Panic Vector: ");
             EarlySerial.WriteHex(ctx->Vector);
             EarlySerial.Write(" ErrorCode: ");

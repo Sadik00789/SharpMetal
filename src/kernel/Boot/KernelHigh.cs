@@ -31,6 +31,16 @@ namespace Kernel.Boot
         public static ulong PmmStart;
         public static ulong PmmPages;
 
+        [StructLayout(LayoutKind.Sequential)]
+        public unsafe struct BootMemoryMap
+        {
+            public const int MaxRegions = 64;
+            public int RegionCount;
+            public fixed ulong RegionStarts[MaxRegions];
+            public fixed ulong RegionPageCounts[MaxRegions];
+        }
+        public static BootMemoryMap UsableMemoryMap;
+
         public static ulong InitrdPhysBase;
         public static ulong InitrdSize;
 
@@ -136,6 +146,13 @@ namespace Kernel.Boot
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "KernelMainHigh")]
         public static void KernelMainHigh()
         {
+            // Visual Checkpoint 1 (GREEN stripe, scanlines 10..19): Entered KernelMainHigh!
+            if (GopPhysBase != 0)
+            {
+                uint* fb = (uint*)GopPhysBase;
+                for (ulong i = GopWidth * 10; i < GopWidth * 20; i++) fb[i] = 0x0000FF00;
+            }
+
             EarlySerial.WriteLine();
             EarlySerial.WriteLine("=================================================================");
             EarlySerial.WriteLine("   Bare-Metal x86-64 C# Microkernel (Native AOT / Higher-Half)  ");
@@ -289,7 +306,24 @@ namespace Kernel.Boot
                 {
                     ulong* bitmapVirt = (ulong*)Hhdm.PhysicalToVirtual(PmmBitmapPhys);
                     PageFrameAllocator.Initialize(bitmapVirt, PmmTotalFrames);
-                    PageFrameAllocator.MarkRangeFree(PmmStart, PmmPages * 4096);
+
+                    if (UsableMemoryMap.RegionCount > 0)
+                    {
+                        for (int r = 0; r < UsableMemoryMap.RegionCount; r++)
+                        {
+                            ulong rStart = UsableMemoryMap.RegionStarts[r];
+                            ulong rPages = UsableMemoryMap.RegionPageCounts[r];
+                            if (rStart != 0 && rPages > 0)
+                            {
+                                PageFrameAllocator.MarkRangeFree(rStart, rPages * 4096);
+                            }
+                        }
+                    }
+                    else if (PmmStart != 0 && PmmPages > 0)
+                    {
+                        PageFrameAllocator.MarkRangeFree(PmmStart, PmmPages * 4096);
+                    }
+
                     EarlySerial.Write("[PMM] PageFrameAllocator initialized. Free frames: ");
                     EarlySerial.WriteDec((long)PageFrameAllocator.FreeFrames);
                     EarlySerial.WriteLine("");

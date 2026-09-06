@@ -75,9 +75,9 @@ namespace Kernel.Boot
                 }
             }
 
-            if (maxAddr == 0 || maxAddr > 0x1_0000_0000UL)
+            if (maxAddr == 0 || maxAddr > 0x4_0000_0000UL)
             {
-                maxAddr = 0x1_0000_0000UL;
+                maxAddr = 0x4_0000_0000UL;
             }
 
             return maxAddr;
@@ -98,6 +98,38 @@ namespace Kernel.Boot
                     {
                         pageCount = desc->NumberOfPages;
                         physStart = desc->PhysicalStart;
+                    }
+                }
+            }
+
+            return pageCount > 0;
+        }
+
+        public static bool FindLargestConventionalRegionBelow4G(byte* mapBuffer, nuint mapSize, nuint descSize, out ulong physStart, out ulong pageCount)
+        {
+            physStart = 0;
+            pageCount = 0;
+            nuint count = mapSize / descSize;
+
+            for (nuint i = 0; i < count; i++)
+            {
+                EfiMemoryDescriptor* desc = (EfiMemoryDescriptor*)(mapBuffer + (i * descSize));
+                if (desc->Type == (uint)EfiMemoryType.EfiConventionalMemory)
+                {
+                    if (desc->PhysicalStart < 0x1_0000_0000UL)
+                    {
+                        ulong end = desc->PhysicalStart + (desc->NumberOfPages * 4096);
+                        ulong usablePages = desc->NumberOfPages;
+                        if (end > 0x1_0000_0000UL)
+                        {
+                            usablePages = (0x1_0000_0000UL - desc->PhysicalStart) / 4096;
+                        }
+
+                        if (usablePages > pageCount)
+                        {
+                            pageCount = usablePages;
+                            physStart = desc->PhysicalStart;
+                        }
                     }
                 }
             }

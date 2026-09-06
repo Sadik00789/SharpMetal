@@ -60,86 +60,76 @@ namespace Kernel.Boot
 
     public static unsafe class EfiMain
     {
-        // 64 KiB memory map buffer (>4096 bytes extra headroom upfront)
         [StructLayout(LayoutKind.Sequential, Size = 65536)]
         private struct MemoryMapBuffer { }
         private static MemoryMapBuffer s_mapBuffer;
 
-        // 14 pages (57,344 bytes) to ensure 13 4KiB-aligned pages for PML4/PDPT/PD
-        [StructLayout(LayoutKind.Sequential, Size = 14 * 4096)]
+        [StructLayout(LayoutKind.Sequential, Size = 40 * 4096)]
         private struct PageTableBuffer { }
         private static PageTableBuffer s_pageTableBuffer;
 
-        // 64 KiB stack buffer for higher-half execution
         [StructLayout(LayoutKind.Sequential, Size = 65536)]
         private struct HighStackBuffer { }
         private static HighStackBuffer s_highStackBuffer;
 
-        // 8 MiB buffer for initial ramdisk (INITRD.IMG)
         [StructLayout(LayoutKind.Sequential, Size = (8 * 1024 * 1024) + 4096)]
         private struct InitrdBuffer { }
         private static InitrdBuffer s_initrdBuffer;
 
+        private static void PrintScreen(EfiSystemTable* st, string msg)
+        {
+            if (st != null && st->ConOut != null && st->ConOut->OutputString != null)
+            {
+                fixed (char* p = msg)
+                {
+                    st->ConOut->OutputString(st->ConOut, p);
+                }
+            }
+        }
+
+        private static void PrintHex(EfiSystemTable* st, ulong value)
+        {
+            char* hexStr = stackalloc char[21];
+            hexStr[0] = '0';
+            hexStr[1] = 'x';
+            for (int i = 0; i < 16; i++)
+            {
+                int shift = (15 - i) * 4;
+                byte nibble = (byte)((value >> shift) & 0xF);
+                hexStr[2 + i] = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+            }
+            hexStr[18] = '\r';
+            hexStr[19] = '\n';
+            hexStr[20] = '\0';
+            if (st != null && st->ConOut != null && st->ConOut->OutputString != null)
+            {
+                st->ConOut->OutputString(st->ConOut, hexStr);
+            }
+        }
+
         [UnmanagedCallersOnly(EntryPoint = "EfiMain")]
         public static long Main(IntPtr imageHandle, EfiSystemTable* systemTable)
         {
-            // 1. Initialize COM1 Early Serial Port (115200 baud, 8N1)
             EarlySerial.Initialize();
 
-            // 2. Output initialization banner to UEFI ConOut
-            if (systemTable != null && systemTable->ConOut != null && systemTable->ConOut->OutputString != null)
-            {
-                fixed (char* banner = "\r\n" +
-                    "=================================================================\r\n" +
-                    "   Bare-Metal x86-64 C# Microkernel (Native AOT / UEFI Direct)\r\n" +
-                    "   Layer 1 & 2: Firmware Boot, Paging & Higher-Half Handover\r\n" +
-                    "=================================================================\r\n\0")
-                {
-                    systemTable->ConOut->OutputString(systemTable->ConOut, banner);
-                }
-            }
-
-            // 3. Serial logging
-            EarlySerial.WriteLine();
-            EarlySerial.WriteLine("=================================================================");
-            EarlySerial.WriteLine("   Bare-Metal x86-64 C# Microkernel (Native AOT / UEFI Direct)");
-            EarlySerial.WriteLine("   Layer 1 & 2: Firmware Boot, Paging & Higher-Half Handover");
-            EarlySerial.WriteLine("=================================================================");
-            EarlySerial.Write("[BOOT] ImageHandle: ");
-            EarlySerial.WriteHex((ulong)imageHandle);
-            EarlySerial.WriteLine();
-            EarlySerial.Write("[BOOT] SystemTable: ");
-            EarlySerial.WriteHex((ulong)systemTable);
-            EarlySerial.WriteLine();
+            PrintScreen(systemTable, "\r\n[1/8] Booting SharpMetal x86-64 Microkernel...\r\n\0");
 
             if (systemTable == null || systemTable->BootServices == null)
             {
-                EarlySerial.WriteLine("[ERROR] Invalid UEFI SystemTable or BootServices!");
-                PortIo.Out8(0xF4, 0x01);
+                PrintScreen(systemTable, "[FATAL] Invalid UEFI BootServices!\r\n\0");
                 return 1;
             }
 
-            // 4. Locate EFI_GRAPHICS_OUTPUT_PROTOCOL (GOP)
+            // 1. Locate GOP
+            PrintScreen(systemTable, "[2/8] Locating UEFI GOP Framebuffer: \0");
             EfiGuid gopGuid = new EfiGuid
             {
-                Data1 = 0x9042a9de,
-                Data2 = 0x23dc,
-                Data3 = 0x4a38,
-                Data4_0 = 0x96,
-                Data4_1 = 0xfb,
-                Data4_2 = 0x7a,
-                Data4_3 = 0xde,
-                Data4_4 = 0xd0,
-                Data4_5 = 0x80,
-                Data4_6 = 0x51,
-                Data4_7 = 0x6a
+                Data1 = 0x9042a9de, Data2 = 0x23dc, Data3 = 0x4a38,
+                Data4_0 = 0x96, Data4_1 = 0xfb, Data4_2 = 0x7a, Data4_3 = 0xde,
+                Data4_4 = 0xd0, Data4_5 = 0x80, Data4_6 = 0x51, Data4_7 = 0x6a
             };
             void* gopInterface = null;
             long gopStatus = systemTable->BootServices->LocateProtocol(&gopGuid, IntPtr.Zero, &gopInterface);
-
-            EarlySerial.Write("[GOP] LocateProtocol status: ");
-            EarlySerial.WriteHex((ulong)gopStatus);
-            EarlySerial.WriteLine();
 
             if (gopStatus == 0 && gopInterface != null)
             {
@@ -151,28 +141,20 @@ namespace Kernel.Boot
                     KernelHigh.GopWidth = gop->Mode->Info->HorizontalResolution;
                     KernelHigh.GopHeight = gop->Mode->Info->VerticalResolution;
                     KernelHigh.GopPixelsPerScanLine = gop->Mode->Info->PixelsPerScanLine;
+                    PrintHex(systemTable, KernelHigh.GopPhysBase);
+            delegate* unmanaged[Cdecl]<void> lowEntry = &KernelHigh.KernelMainHigh;
+            PrintScreen(systemTable, "[ADDR] Kernel Physical Entry: ");
+            PrintHex(systemTable, (ulong)lowEntry);
 
-                    EarlySerial.Write("[GOP] Framebuffer Physical Base: ");
-                    EarlySerial.WriteHex(KernelHigh.GopPhysBase);
-                    EarlySerial.WriteLine();
-                    EarlySerial.Write("[GOP] Framebuffer Size: ");
-                    EarlySerial.WriteHex(KernelHigh.GopFbSize);
-                    EarlySerial.WriteLine();
-                    EarlySerial.Write("[GOP] Resolution: ");
-                    EarlySerial.WriteDec(KernelHigh.GopWidth);
-                    EarlySerial.Write("x");
-                    EarlySerial.WriteDec(KernelHigh.GopHeight);
-                    EarlySerial.Write(" (Pitch: ");
-                    EarlySerial.WriteDec(KernelHigh.GopPixelsPerScanLine);
-                    EarlySerial.WriteLine(")");
                 }
             }
             else
             {
-                EarlySerial.WriteLine("[WARN] GOP Protocol could not be located.");
+                PrintScreen(systemTable, "NOT FOUND\r\n\0");
             }
 
-            // 4b. Load INITRD.IMG from FAT32 boot volume
+            // 2. Load INITRD
+            PrintScreen(systemTable, "[3/8] Loading INITRD.IMG from boot volume...\r\n\0");
             EfiGuid loadedImageGuid = new EfiGuid
             {
                 Data1 = 0x5B1B31A1, Data2 = 0x9562, Data3 = 0x11D2,
@@ -203,7 +185,7 @@ namespace Kernel.Boot
                         EfiFileProtocol* initrdFile = null;
                         fixed (char* initrdPath = "EFI\\BOOT\\INITRD.IMG\0")
                         {
-                            long openStatus = rootDir->Open(rootDir, &initrdFile, initrdPath, 1UL /* EFI_FILE_MODE_READ */, 0);
+                            long openStatus = rootDir->Open(rootDir, &initrdFile, initrdPath, 1UL, 0);
                             if (openStatus == 0 && initrdFile != null)
                             {
                                 fixed (InitrdBuffer* pInitrd = &s_initrdBuffer)
@@ -215,19 +197,9 @@ namespace Kernel.Boot
                                     {
                                         KernelHigh.InitrdPhysBase = (ulong)alignedInitrd;
                                         KernelHigh.InitrdSize = (ulong)readBytes;
-
-                                        EarlySerial.Write("[INITRD] Loaded ramdisk from ESP at physical: ");
-                                        EarlySerial.WriteHex(KernelHigh.InitrdPhysBase);
-                                        EarlySerial.Write(" (Size: ");
-                                        EarlySerial.WriteDec((long)KernelHigh.InitrdSize);
-                                        EarlySerial.WriteLine(" bytes)");
                                     }
                                 }
                                 initrdFile->Close(initrdFile);
-                            }
-                            else
-                            {
-                                EarlySerial.WriteLine("[WARN] Could not open EFI\\BOOT\\INITRD.IMG");
                             }
                         }
                         rootDir->Close(rootDir);
@@ -235,55 +207,36 @@ namespace Kernel.Boot
                 }
             }
 
-            // 4c. Locate ACPI 2.0 / 1.0 RSDP Table Pointer from systemTable->ConfigurationTable
-            // ACPI 2.0: { 0x8868e871, 0xe4f1, 0x11d3, { 0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81 } }
-            // ACPI 1.0: { 0xeb9d2d30, 0x2d88, 0x11d3, { 0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d } }
+            // 3. Locate ACPI RSDP
+            PrintScreen(systemTable, "[4/8] Locating ACPI RSDP...\r\n\0");
             if (systemTable != null && (void*)systemTable->ConfigurationTable != null)
             {
                 EfiConfigurationTable* configTables = (EfiConfigurationTable*)systemTable->ConfigurationTable;
                 nuint numEntries = systemTable->NumberOfTableEntries;
-                ulong rsdp2Phys = 0;
-                ulong rsdp1Phys = 0;
-
                 for (nuint i = 0; i < numEntries; i++)
                 {
                     EfiConfigurationTable* entry = &configTables[i];
-                    if (entry->VendorGuid.Data1 == 0x8868E871 &&
-                        entry->VendorGuid.Data2 == 0xE4F1 &&
-                        entry->VendorGuid.Data3 == 0x11D3 &&
-                        entry->VendorGuid.Data4_0 == 0xBC && entry->VendorGuid.Data4_1 == 0x22 &&
-                        entry->VendorGuid.Data4_2 == 0x00 && entry->VendorGuid.Data4_3 == 0x80 &&
-                        entry->VendorGuid.Data4_4 == 0xC7 && entry->VendorGuid.Data4_5 == 0x3C &&
-                        entry->VendorGuid.Data4_6 == 0x88 && entry->VendorGuid.Data4_7 == 0x81)
+                    if (entry->VendorTable != null)
                     {
-                        rsdp2Phys = (ulong)entry->VendorTable;
-                        break;
-                    }
-
-                    if (entry->VendorGuid.Data1 == 0xEB9D2D30 &&
-                        entry->VendorGuid.Data2 == 0x2D88 &&
-                        entry->VendorGuid.Data3 == 0x11D3 &&
-                        entry->VendorGuid.Data4_0 == 0x9A && entry->VendorGuid.Data4_1 == 0x16 &&
-                        entry->VendorGuid.Data4_2 == 0x00 && entry->VendorGuid.Data4_3 == 0x90 &&
-                        entry->VendorGuid.Data4_4 == 0x27 && entry->VendorGuid.Data4_5 == 0x3F &&
-                        entry->VendorGuid.Data4_6 == 0xC1 && entry->VendorGuid.Data4_7 == 0x4D)
-                    {
-                        rsdp1Phys = (ulong)entry->VendorTable;
+                        if (entry->VendorGuid.Data1 == 0x8868E871 && entry->VendorGuid.Data2 == 0xE4F1)
+                        {
+                            KernelHigh.RsdpPhysBase = (ulong)entry->VendorTable;
+                            break;
+                        }
+                        if (entry->VendorGuid.Data1 == 0xEB9D2D30 && entry->VendorGuid.Data2 == 0x2D88)
+                        {
+                            KernelHigh.RsdpPhysBase = (ulong)entry->VendorTable;
+                        }
                     }
                 }
-
-                ulong rsdpPhys = rsdp2Phys != 0 ? rsdp2Phys : rsdp1Phys;
-                KernelHigh.RsdpPhysBase = rsdpPhys;
-                EarlySerial.Write("[ACPI] Located RSDP at physical: ");
-                EarlySerial.WriteHex(rsdpPhys);
-                EarlySerial.WriteLine();
             }
 
             fixed (MemoryMapBuffer* pMap = &s_mapBuffer)
             fixed (PageTableBuffer* pPt = &s_pageTableBuffer)
             fixed (HighStackBuffer* pStk = &s_highStackBuffer)
             {
-                // 5. Query initial memory map for physical memory managers
+                // 4. Memory map
+                PrintScreen(systemTable, "[5/8] Querying Memory Map & PMM...\r\n\0");
                 byte* pMapBuffer = (byte*)pMap;
                 nuint initialMapSize = 65536;
                 nuint initialMapKey = 0;
@@ -299,27 +252,11 @@ namespace Kernel.Boot
 
                 if (mapStatus == 0)
                 {
-                    ulong totalRam = UefiMemoryParser.GetTotalUsableMemory(pMapBuffer, initialMapSize, initialDescSize);
-                    EarlySerial.Write("[MEM] Total Usable RAM: ");
-                    EarlySerial.WriteHex(totalRam);
-                    EarlySerial.WriteLine();
-
-                    if (UefiMemoryParser.FindLargestConventionalRegion(pMapBuffer, initialMapSize, initialDescSize, out ulong regionStart, out ulong pageCount))
+                    if (UefiMemoryParser.FindLargestConventionalRegionBelow4G(pMapBuffer, initialMapSize, initialDescSize, out ulong regionStart, out ulong pageCount))
                     {
-                        EarlySerial.Write("[PMM] Largest Conventional Region: ");
-                        EarlySerial.WriteHex(regionStart);
-                        EarlySerial.Write(" (Pages: ");
-                        EarlySerial.WriteDec((long)pageCount);
-                        EarlySerial.WriteLine(")");
-
-                        if (pageCount >= 8192) // 32 MiB = 8192 pages
+                        if (pageCount >= 8192)
                         {
                             DmaArenaAllocator.Initialize(regionStart, 32 * 1024 * 1024);
-                            EarlySerial.Write("[DMA] 32 MiB DMA Arena reserved at: ");
-                            EarlySerial.WriteHex(regionStart);
-                            EarlySerial.WriteLine();
-
-                            // Allocate bitmap for PageFrameAllocator from DMA arena
                             ulong maxPhys = UefiMemoryParser.GetMaxPhysicalAddress(pMapBuffer, initialMapSize, initialDescSize);
                             ulong totalFrames = (maxPhys + 4095) / 4096;
                             ulong bitmapBytes = (totalFrames + 7) / 8;
@@ -332,14 +269,50 @@ namespace Kernel.Boot
                             KernelHigh.PmmStart = pmmStart;
                             KernelHigh.PmmPages = pmmPages;
 
-                            EarlySerial.Write("[PMM] Physical Frame Allocator configured. Total frames: ");
-                            EarlySerial.WriteDec((long)totalFrames);
-                            EarlySerial.WriteLine();
+                            // Register all conventional memory regions up to 16 GiB
+                            nuint numDescriptors = initialMapSize / initialDescSize;
+                            int regIdx = 0;
+
+                            if (pmmPages > 0)
+                            {
+                                KernelHigh.UsableMemoryMap.RegionStarts[regIdx] = pmmStart;
+                                KernelHigh.UsableMemoryMap.RegionPageCounts[regIdx] = pmmPages;
+                                regIdx++;
+                            }
+
+                            for (nuint d = 0; d < numDescriptors && regIdx < KernelHigh.BootMemoryMap.MaxRegions; d++)
+                            {
+                                EfiMemoryDescriptor* desc = (EfiMemoryDescriptor*)(pMapBuffer + (d * initialDescSize));
+                                if (desc->Type == (uint)EfiMemoryType.EfiConventionalMemory)
+                                {
+                                    if (desc->PhysicalStart == regionStart) continue;
+
+                                    if (desc->PhysicalStart < 0x4_0000_0000UL) // below 16 GiB
+                                    {
+                                        ulong start = desc->PhysicalStart;
+                                        ulong pages = desc->NumberOfPages;
+                                        ulong end = start + (pages * 4096);
+                                        if (end > 0x4_0000_0000UL)
+                                        {
+                                            pages = (0x4_0000_0000UL - start) / 4096;
+                                        }
+
+                                        if (pages > 0)
+                                        {
+                                            KernelHigh.UsableMemoryMap.RegionStarts[regIdx] = start;
+                                            KernelHigh.UsableMemoryMap.RegionPageCounts[regIdx] = pages;
+                                            regIdx++;
+                                        }
+                                    }
+                                }
+                            }
+                            KernelHigh.UsableMemoryMap.RegionCount = regIdx;
                         }
                     }
                 }
 
-                // 6. Build 4-level page tables with Identity, HHDM, and PAT WC on GOP Framebuffer
+                // 5. Page Tables
+                PrintScreen(systemTable, "[6/8] Building 4-Level Page Tables...\r\n\0");
                 ulong rawPt = (ulong)(byte*)pPt;
                 ulong alignedPt = (rawPt + 4095) & ~4095UL;
                 ulong pml4Phys = VirtualMemorySpace.CreateKernelSpace(
@@ -347,18 +320,12 @@ namespace Kernel.Boot
                     KernelHigh.GopPhysBase,
                     KernelHigh.GopFbSize);
 
-                EarlySerial.Write("[PAGING] Kernel PML4 created at: ");
-                EarlySerial.WriteHex(pml4Phys);
-                EarlySerial.WriteLine();
+                // 6. PAT MSR
+                PrintScreen(systemTable, "[7/8] Programming IA32_PAT MSR...\r\n\0");
+                PatManager.Initialize();
 
-                // 7. Configure IA32_PAT MSR (PA4 = 0x01 Write-Combining)
-                ulong patVal = PatManager.Initialize();
-                EarlySerial.Write("[PAT] IA32_PAT programmed. MSR 0x277: ");
-                EarlySerial.WriteHex(patVal);
-                EarlySerial.WriteLine();
-
-                // 8. ExitBootServices with >= 4096 bytes headroom upfront
-                // Strictly NO allocations or logging between GetMemoryMap and ExitBootServices
+                // 7. ExitBootServices
+                PrintScreen(systemTable, "[8/8] Calling ExitBootServices (Terminating UEFI)...\r\n\0");
                 bool exitSuccess = ExitBootServicesHelper.Exit(
                     imageHandle,
                     systemTable->BootServices,
@@ -369,33 +336,17 @@ namespace Kernel.Boot
 
                 if (!exitSuccess)
                 {
-                    EarlySerial.WriteLine("[ERROR] ExitBootServices failed after retries!");
-                    PortIo.Out8(0xF4, 0x01);
-                    return 1;
+                    PrintScreen(systemTable, "[FATAL ERROR] ExitBootServices failed!\r\n\0");
+                    while (true) { }
                 }
 
-                // 9. Now in bare-metal control! Disable hardware interrupts
                 Cpu.DisableInterrupts();
-                EarlySerial.WriteLine("[BOOT] ExitBootServices succeeded. UEFI terminated. Interrupts disabled.");
 
-                // 10. High Entry Address Calculation:
-                // Convert &KernelHigh.KernelMainHigh to its canonical higher-half address (add Hhdm.Base)
                 delegate* unmanaged[Cdecl]<void> lowEntry = &KernelHigh.KernelMainHigh;
                 ulong highEntry = (ulong)lowEntry + Hhdm.Base;
-
-                // Compute 16-byte aligned high stack top in HHDM
                 ulong stackPhys = (ulong)(byte*)pStk;
                 ulong highStackTop = (stackPhys + 65536 + Hhdm.Base) & ~15UL;
 
-                EarlySerial.Write("[BOOT] High Entry Address: ");
-                EarlySerial.WriteHex(highEntry);
-                EarlySerial.WriteLine();
-                EarlySerial.Write("[BOOT] High Stack Top: ");
-                EarlySerial.WriteHex(highStackTop);
-                EarlySerial.WriteLine();
-
-                // 11. Transition CPU into Higher-Half:
-                // Switch CR3, 16-byte align RSP with 40-byte shadow space, and jump to KernelMainHigh
                 Cpu.SwitchToHigherHalf(pml4Phys, highStackTop, highEntry);
             }
 
