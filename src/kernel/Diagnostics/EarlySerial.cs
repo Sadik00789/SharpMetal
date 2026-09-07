@@ -41,7 +41,12 @@ namespace Kernel.Diagnostics
             return (PortIo.In8(Com1Base + 5) & 0x20) != 0;
         }
 
-        public static void WriteChar(char c)
+        private static Concurrency.SpinLockWithIrqSave s_serialLock;
+
+        public static ulong AcquireLock() => s_serialLock.Acquire();
+        public static void ReleaseLock(ulong rflags) => s_serialLock.Release(rflags);
+
+        public static void WriteCharInternal(char c)
         {
             if (!s_isSupported) return;
 
@@ -58,58 +63,130 @@ namespace Kernel.Diagnostics
             }
         }
 
-        public static void Write(string s)
+        public static void WriteChar(char c)
         {
             if (!s_isSupported) return;
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                WriteCharInternal(c);
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
+            }
+        }
+
+        public static void WriteInternal(string s)
+        {
+            if (!s_isSupported || s == null) return;
             for (int i = 0; i < s.Length; i++)
             {
                 char c = s[i];
-                if (c == '\n') WriteChar('\r');
-                WriteChar(c);
+                if (c == '\n') WriteCharInternal('\r');
+                WriteCharInternal(c);
+            }
+        }
+
+        public static void Write(string s)
+        {
+            if (!s_isSupported || s == null) return;
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                WriteInternal(s);
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
             }
         }
 
         public static void WriteLine(string s)
         {
             if (!s_isSupported) return;
-            Write(s);
-            WriteChar('\r');
-            WriteChar('\n');
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                WriteInternal(s);
+                WriteCharInternal('\r');
+                WriteCharInternal('\n');
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
+            }
         }
 
         public static void WriteLine()
         {
             if (!s_isSupported) return;
-            WriteChar('\r');
-            WriteChar('\n');
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                WriteCharInternal('\r');
+                WriteCharInternal('\n');
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
+            }
+        }
+
+        public static void WriteHexInternal(ulong value)
+        {
+            if (!s_isSupported) return;
+            WriteInternal("0x");
+            for (int i = 60; i >= 0; i -= 4)
+            {
+                byte nibble = (byte)((value >> i) & 0x0F);
+                char c = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+                WriteCharInternal(c);
+            }
         }
 
         public static void WriteHex(ulong value)
         {
             if (!s_isSupported) return;
-            Write("0x");
-            for (int i = 60; i >= 0; i -= 4)
+            ulong rflags = s_serialLock.Acquire();
+            try
             {
-                byte nibble = (byte)((value >> i) & 0x0F);
-                char c = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
-                WriteChar(c);
+                WriteHexInternal(value);
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
             }
         }
 
-        public static void WriteDec(long value)
+        public static void WriteDecInternal(long value)
         {
             if (!s_isSupported) return;
-            if (value == 0) { WriteChar('0'); return; }
-            if (value < 0) { WriteChar('-'); value = -value; }
+            if (value == 0) { WriteCharInternal('0'); return; }
+            if (value < 0) { WriteCharInternal('-'); value = -value; }
 
             long divisor = 1;
             while (value / divisor >= 10) divisor *= 10;
             while (divisor > 0)
             {
                 long digit = value / divisor;
-                WriteChar((char)('0' + digit));
+                WriteCharInternal((char)('0' + digit));
                 value %= divisor;
                 divisor /= 10;
+            }
+        }
+
+        public static void WriteDec(long value)
+        {
+            if (!s_isSupported) return;
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                WriteDecInternal(value);
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
             }
         }
     }

@@ -119,6 +119,51 @@ namespace Kernel.Arch.x86_64.Hardware
         }
 
         [DllImport("*")]
+        public static extern void CpuPause();
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        public static void Pause() => CpuPause();
+
+        [DllImport("*")]
+        public static extern int AtomicIncrement32(int* ptr);
+
+        [DllImport("*")]
+        public static extern int AtomicDecrement32(int* ptr);
+
+        [DllImport("*")]
+        public static extern int AtomicCompareExchange32(int* ptr, int value, int comparand);
+
+        [DllImport("*")]
+        public static extern ulong AtomicCompareExchange64(ulong* ptr, ulong value, ulong comparand);
+
+        [DllImport("*")]
+        public static extern int AtomicExchange32(int* ptr, int value);
+
+        [DllImport("*")]
+        public static extern int AtomicFetchAndAdd32(int* ptr, int delta);
+
+        [DllImport("*")]
+        public static extern int GetCurrentCoreIndex();
+
+        [DllImport("*")]
+        public static extern void* GetCurrentThread();
+
+        [DllImport("*")]
+        public static extern void SetCurrentThread(void* thread);
+
+        [DllImport("*")]
+        public static extern ulong GetApEntry64();
+
+        [DllImport("*")]
+        public static extern void SetApInitialStack(ulong apicId, ulong stackTop);
+
+        [DllImport("*")]
+        public static extern byte* GetApTrampolineBinary();
+
+        [DllImport("*")]
+        public static extern ulong GetApTrampolineBinarySize();
+
+        [DllImport("*")]
         public static extern uint CpuIdEcx(uint leaf);
 
         [DllImport("*")]

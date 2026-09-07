@@ -19,7 +19,7 @@ namespace Kernel.Ipc
         {
             if (ep == null) return ~0UL;
 
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
             ThreadControlBlock* caller = Scheduler.CurrentThread;
 
             if (ep->HasReceivers)
@@ -47,7 +47,7 @@ namespace Kernel.Ipc
                 receiver->IpcMessageInfo = msgInfo != 0 ? msgInfo : IpcMessageHeader.SyncRpc;
                 receiver->IpcBadge = badge;
 
-                // Caller Reply Tracking (User Adjustment 1)
+                // Caller Reply Tracking
                 if (isCall)
                 {
                     receiver->ReplyTarget = caller;
@@ -60,13 +60,11 @@ namespace Kernel.Ipc
                 receiver->RemainingTicks += caller->RemainingTicks;
                 caller->RemainingTicks = 0;
 
-                // Direct handoff to receiver
-                Scheduler.DirectHandoff(receiver);
+                // Direct handoff to receiver (switches context, releases s_schedLock on target)
+                Scheduler.DirectHandoffLocked(receiver, rflags);
 
                 // If this was a call, caller was blocked; when resumed by reply, payload is in caller->IpcRegisters
-                ulong ret = isCall ? caller->IpcRegisters.D0 : 0;
-                Cpu.EnableInterrupts();
-                return ret;
+                return isCall ? caller->IpcRegisters.D0 : 0;
             }
             else
             {
@@ -81,11 +79,9 @@ namespace Kernel.Ipc
                 caller->State = isCall ? ThreadState.BlockedOnReply : ThreadState.BlockedOnSend;
                 ep->EnqueueSend(caller);
 
-                Scheduler.Schedule();
+                Scheduler.ScheduleLocked(rflags);
 
-                ulong ret = isCall ? caller->IpcRegisters.D0 : 0;
-                Cpu.EnableInterrupts();
-                return ret;
+                return isCall ? caller->IpcRegisters.D0 : 0;
             }
         }
 
@@ -101,7 +97,7 @@ namespace Kernel.Ipc
             d0 = 0; d1 = 0; d2 = 0; d3 = 0; badge = 0; msgInfo = 0;
             if (ep == null) return ~0UL;
 
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
             ThreadControlBlock* receiver = Scheduler.CurrentThread;
 
             if (ep->HasSenders)
@@ -125,10 +121,10 @@ namespace Kernel.Ipc
                 {
                     // Regular send; unblock sender
                     sender->State = ThreadState.Ready;
-                    Scheduler.EnqueueReady(sender);
+                    Scheduler.EnqueueThreadUnlocked(sender);
                 }
 
-                Cpu.EnableInterrupts();
+                Scheduler.ReleaseSchedulerLock(rflags);
                 return 0;
             }
             else
@@ -137,7 +133,7 @@ namespace Kernel.Ipc
                 receiver->State = ThreadState.BlockedOnReceive;
                 ep->EnqueueReceive(receiver);
 
-                Scheduler.Schedule();
+                Scheduler.ScheduleLocked(rflags);
 
                 // When resumed, payload is in receiver->IpcRegisters
                 d0 = receiver->IpcRegisters.D0;
@@ -147,20 +143,19 @@ namespace Kernel.Ipc
                 msgInfo = receiver->IpcMessageInfo;
                 badge = receiver->IpcBadge;
 
-                Cpu.EnableInterrupts();
                 return 0;
             }
         }
 
         public static ulong Reply(ulong d0, ulong d1, ulong d2, ulong d3)
         {
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
             ThreadControlBlock* server = Scheduler.CurrentThread;
 
             ThreadControlBlock* client = server->ReplyTarget;
             if (client == null)
             {
-                Cpu.EnableInterrupts();
+                Scheduler.ReleaseSchedulerLock(rflags);
                 return ~0UL; // No client waiting on reply
             }
 
@@ -179,9 +174,8 @@ namespace Kernel.Ipc
             client->RemainingTicks += server->RemainingTicks;
             server->RemainingTicks = 0;
 
-            Scheduler.DirectHandoff(client);
+            Scheduler.DirectHandoffLocked(client, rflags);
 
-            Cpu.EnableInterrupts();
             return 0;
         }
     }

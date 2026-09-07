@@ -44,5 +44,7 @@ namespace Kernel.Scheduling
         public void* BoundEndpoint;             // For sys_recv_any mutual unlinking
         public void* BoundNotification;         // For sys_recv_any mutual unlinking
         public ulong UserRsp;                   // Phase 6 saved user-space RSP
+        public ulong Rflags;                    // Saved RFLAGS for SMP scheduler lock release
+        public volatile int IsExecuting;        // SMP concurrent execution guard (1 = executing, 0 = idle)
     }
 }

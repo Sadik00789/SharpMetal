@@ -18,7 +18,7 @@ namespace Kernel.Ipc
         {
             msgType = 0; d0 = 0; d1 = 0; d2 = 0; d3 = 0; badge = 0;
 
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
             ThreadControlBlock* current = Scheduler.CurrentThread;
 
             // 1. Check Notification first
@@ -27,7 +27,7 @@ namespace Kernel.Ipc
                 d0 = notif->State;
                 notif->State = 0;
                 msgType = IpcMessageHeader.AsyncNotification;
-                Cpu.EnableInterrupts();
+                Scheduler.ReleaseSchedulerLock(rflags);
                 return 0;
             }
 
@@ -50,10 +50,10 @@ namespace Kernel.Ipc
                 else
                 {
                     sender->State = ThreadState.Ready;
-                    Scheduler.EnqueueReady(sender);
+                    Scheduler.EnqueueThreadUnlocked(sender);
                 }
 
-                Cpu.EnableInterrupts();
+                Scheduler.ReleaseSchedulerLock(rflags);
                 return 0;
             }
 
@@ -72,12 +72,10 @@ namespace Kernel.Ipc
                 notif->WaitingThread = current;
             }
 
-            Scheduler.Schedule();
+            Scheduler.ScheduleLocked(rflags);
 
-            // Ensure interrupts are disabled (cli) during unlinking and state extraction
-            Cpu.DisableInterrupts();
-
-            // When unblocked, read delivered payload
+            // When unblocked, lock was released by ContextSwitch.
+            // Read delivered payload
             msgType = current->IpcMessageInfo;
             d0 = current->IpcRegisters.D0;
             d1 = current->IpcRegisters.D1;
@@ -85,29 +83,10 @@ namespace Kernel.Ipc
             d3 = current->IpcRegisters.D3;
             badge = current->IpcBadge;
 
-            // Mutual Unlinking Safeguard:
-            // Ensure listeners are fully detached from the alternate primitive
-            if (msgType == IpcMessageHeader.AsyncNotification)
-            {
-                if (current->BoundEndpoint != null)
-                {
-                    ((Endpoint*)current->BoundEndpoint)->RemoveReceive(current);
-                    current->BoundEndpoint = null;
-                }
-            }
-            else if (msgType == IpcMessageHeader.SyncRpc)
-            {
-                if (current->BoundNotification != null)
-                {
-                    ((Notification*)current->BoundNotification)->WaitingThread = null;
-                    current->BoundNotification = null;
-                }
-            }
-
+            // Mutual unlinking is already handled by Signal or Send when waking this thread
             current->BoundEndpoint = null;
             current->BoundNotification = null;
 
-            Cpu.EnableInterrupts();
             return 0;
         }
     }

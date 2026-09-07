@@ -440,10 +440,28 @@ echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
     --directpinvoke:XSetBv \
     --directpinvoke:Invlpg \
     --directpinvoke:ReadRflags \
-    --directpinvoke:RestoreRflags
+    --directpinvoke:RestoreRflags \
+    --directpinvoke:CpuPause \
+    --directpinvoke:AtomicIncrement32 \
+    --directpinvoke:AtomicDecrement32 \
+    --directpinvoke:AtomicCompareExchange32 \
+    --directpinvoke:AtomicCompareExchange64 \
+    --directpinvoke:AtomicExchange32 \
+    --directpinvoke:AtomicFetchAndAdd32 \
+    --directpinvoke:GetCurrentCoreIndex \
+    --directpinvoke:GetCurrentThread \
+    --directpinvoke:SetCurrentThread \
+    --directpinvoke:GetApEntry64 \
+    --directpinvoke:SetApInitialStack \
+    --directpinvoke:GetApTrampolineBinary \
+    --directpinvoke:GetApTrampolineBinarySize
+
+echo "[NASM] Assembling ApTrampoline.asm..."
+nasm -f bin "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.asm" \
+    -o "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.bin"
 
 echo "[NASM] Assembling Entry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/Entry.asm" \
+nasm -f win64 -i"${REPO_ROOT}/" "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/Entry.asm" \
     -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Entry.obj"
 
 echo "[NASM] Assembling DescriptorFlush.asm..."

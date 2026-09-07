@@ -310,15 +310,44 @@ namespace Kernel.Memory.Virtual
             ulong pdIdx = (vaddr >> 21) & 0x1FF;
             if ((pd[pdIdx] & 1) == 0) return;
 
-            ulong* pt = (ulong*)Hhdm.PhysicalToVirtual(pd[pdIdx] & 0x000F_FFFF_FFFF_F000UL);
-            ulong ptIdx = (vaddr >> 12) & 0x1FF;
-            
-            pt[ptIdx] = 0; // Clear PTE
-
-            if (Cpu.ReadCr3() == pml4Phys)
+            if ((pd[pdIdx] & Paging.LargePage) != 0)
             {
-                Cpu.Invlpg(vaddr);
+                // If unmapping low trampoline address 0x0000_8000, split the 2MB page into 4KB entries
+                if (vaddr < Paging.PageSize2M)
+                {
+                    ulong ptPhys = PageFrameAllocator.AllocateFrame();
+                    if (ptPhys != 0)
+                    {
+                        ulong* newPt = (ulong*)Hhdm.PhysicalToVirtual(ptPhys);
+                        for (uint i = 0; i < 512; i++)
+                        {
+                            ulong phys = (ulong)i * 4096;
+                            if (phys == (vaddr & ~0xFFFUL))
+                            {
+                                newPt[i] = 0; // Unmap 0x8000
+                            }
+                            else
+                            {
+                                newPt[i] = phys | Paging.Present | Paging.Writable;
+                            }
+                        }
+                        pd[pdIdx] = ptPhys | Paging.Present | Paging.Writable;
+                    }
+                }
+                else
+                {
+                    pd[pdIdx] = 0;
+                }
             }
+            else
+            {
+                ulong* pt = (ulong*)Hhdm.PhysicalToVirtual(pd[pdIdx] & 0x000F_FFFF_FFFF_F000UL);
+                ulong ptIdx = (vaddr >> 12) & 0x1FF;
+                pt[ptIdx] = 0; // Clear PTE
+            }
+
+            // Issue broadcast TLB shootdown across all cores
+            SmpTlbShootdown.BroadcastShootdown(pml4Phys, vaddr, 1);
         }
 
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]

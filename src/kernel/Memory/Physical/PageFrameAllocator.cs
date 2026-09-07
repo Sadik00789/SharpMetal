@@ -1,9 +1,12 @@
+using Kernel.Concurrency;
+
 namespace Kernel.Memory.Physical
 {
     public static unsafe class PageFrameAllocator
     {
         public const ulong PageSize = 4096;
 
+        private static SpinLockWithIrqSave s_pmmLock;
         private static ulong* _bitmap;
         private static ulong _totalFrames;
         private static ulong _freeFrames;
@@ -30,13 +33,108 @@ namespace Kernel.Memory.Physical
 
         public static void MarkRangeFree(ulong startPhys, ulong byteLength)
         {
-            ulong startFrame = startPhys / PageSize;
-            ulong frameCount = byteLength / PageSize;
-
-            for (ulong i = 0; i < frameCount; i++)
+            ulong rflags = s_pmmLock.Acquire();
+            try
             {
-                ulong frame = startFrame + i;
-                if (frame >= _totalFrames) break;
+                ulong startFrame = startPhys / PageSize;
+                ulong frameCount = byteLength / PageSize;
+
+                for (ulong i = 0; i < frameCount; i++)
+                {
+                    ulong frame = startFrame + i;
+                    if (frame >= _totalFrames) break;
+
+                    ulong wordIdx = frame / 64;
+                    int bitIdx = (int)(frame % 64);
+
+                    if ((_bitmap[wordIdx] & (1UL << bitIdx)) != 0)
+                    {
+                        _bitmap[wordIdx] &= ~(1UL << bitIdx);
+                        _freeFrames++;
+                    }
+                }
+            }
+            finally
+            {
+                s_pmmLock.Release(rflags);
+            }
+        }
+
+        public static void MarkRangeUsed(ulong startPhys, ulong byteLength)
+        {
+            ulong rflags = s_pmmLock.Acquire();
+            try
+            {
+                ulong startFrame = startPhys / PageSize;
+                ulong frameCount = (byteLength + PageSize - 1) / PageSize;
+
+                for (ulong i = 0; i < frameCount; i++)
+                {
+                    ulong frame = startFrame + i;
+                    if (frame >= _totalFrames) break;
+
+                    ulong wordIdx = frame / 64;
+                    int bitIdx = (int)(frame % 64);
+
+                    if ((_bitmap[wordIdx] & (1UL << bitIdx)) == 0)
+                    {
+                        _bitmap[wordIdx] |= (1UL << bitIdx);
+                        if (_freeFrames > 0) _freeFrames--;
+                    }
+                }
+            }
+            finally
+            {
+                s_pmmLock.Release(rflags);
+            }
+        }
+
+        public static ulong AllocateFrame()
+        {
+            ulong rflags = s_pmmLock.Acquire();
+            try
+            {
+                if (_freeFrames == 0) return 0;
+
+                ulong bitmapWords = (_totalFrames + 63) / 64;
+                for (ulong i = 0; i < bitmapWords; i++)
+                {
+                    ulong idx = (_lastFoundIndex + i) % bitmapWords;
+                    ulong word = _bitmap[idx];
+                    if (word != ~0UL)
+                    {
+                        // Find first zero bit
+                        for (int bit = 0; bit < 64; bit++)
+                        {
+                            if ((word & (1UL << bit)) == 0)
+                            {
+                                ulong frame = (idx * 64) + (ulong)bit;
+                                if (frame >= _totalFrames) return 0;
+
+                                _bitmap[idx] |= (1UL << bit);
+                                _freeFrames--;
+                                _lastFoundIndex = idx;
+                                return frame * PageSize;
+                            }
+                        }
+                    }
+                }
+
+                return 0;
+            }
+            finally
+            {
+                s_pmmLock.Release(rflags);
+            }
+        }
+
+        public static void FreeFrame(ulong physAddr)
+        {
+            ulong rflags = s_pmmLock.Acquire();
+            try
+            {
+                ulong frame = physAddr / PageSize;
+                if (frame >= _totalFrames) return;
 
                 ulong wordIdx = frame / 64;
                 int bitIdx = (int)(frame % 64);
@@ -47,110 +145,83 @@ namespace Kernel.Memory.Physical
                     _freeFrames++;
                 }
             }
-        }
-
-        public static void MarkRangeUsed(ulong startPhys, ulong byteLength)
-        {
-            ulong startFrame = startPhys / PageSize;
-            ulong frameCount = (byteLength + PageSize - 1) / PageSize;
-
-            for (ulong i = 0; i < frameCount; i++)
+            finally
             {
-                ulong frame = startFrame + i;
-                if (frame >= _totalFrames) break;
-
-                ulong wordIdx = frame / 64;
-                int bitIdx = (int)(frame % 64);
-
-                if ((_bitmap[wordIdx] & (1UL << bitIdx)) == 0)
-                {
-                    _bitmap[wordIdx] |= (1UL << bitIdx);
-                    if (_freeFrames > 0) _freeFrames--;
-                }
-            }
-        }
-
-        public static ulong AllocateFrame()
-        {
-            if (_freeFrames == 0) return 0;
-
-            ulong bitmapWords = (_totalFrames + 63) / 64;
-            for (ulong i = 0; i < bitmapWords; i++)
-            {
-                ulong idx = (_lastFoundIndex + i) % bitmapWords;
-                ulong word = _bitmap[idx];
-                if (word != ~0UL)
-                {
-                    // Find first zero bit
-                    for (int bit = 0; bit < 64; bit++)
-                    {
-                        if ((word & (1UL << bit)) == 0)
-                        {
-                            ulong frame = (idx * 64) + (ulong)bit;
-                            if (frame >= _totalFrames) return 0;
-
-                            _bitmap[idx] |= (1UL << bit);
-                            _freeFrames--;
-                            _lastFoundIndex = idx;
-                            return frame * PageSize;
-                        }
-                    }
-                }
-            }
-
-            return 0;
-        }
-
-        public static void FreeFrame(ulong physAddr)
-        {
-            ulong frame = physAddr / PageSize;
-            if (frame >= _totalFrames) return;
-
-            ulong wordIdx = frame / 64;
-            int bitIdx = (int)(frame % 64);
-
-            if ((_bitmap[wordIdx] & (1UL << bitIdx)) != 0)
-            {
-                _bitmap[wordIdx] &= ~(1UL << bitIdx);
-                _freeFrames++;
+                s_pmmLock.Release(rflags);
             }
         }
 
         public static ulong AllocateContiguousFrames(uint count)
         {
-            if (count == 0 || _freeFrames < count) return 0;
-            if (count == 1) return AllocateFrame();
+            if (count == 0) return 0;
 
-            ulong run = 0;
-            ulong runStart = 0;
-
-            for (ulong frame = 0; frame < _totalFrames; frame++)
+            ulong rflags = s_pmmLock.Acquire();
+            try
             {
-                ulong wordIdx = frame / 64;
-                int bitIdx = (int)(frame % 64);
+                if (_freeFrames < count) return 0;
 
-                if ((_bitmap[wordIdx] & (1UL << bitIdx)) == 0)
+                if (count == 1)
                 {
-                    if (run == 0) runStart = frame;
-                    run++;
-                    if (run == count)
+                    ulong bitmapWords = (_totalFrames + 63) / 64;
+                    for (ulong i = 0; i < bitmapWords; i++)
                     {
-                        for (ulong j = 0; j < count; j++)
+                        ulong idx = (_lastFoundIndex + i) % bitmapWords;
+                        ulong word = _bitmap[idx];
+                        if (word != ~0UL)
                         {
-                            ulong f = runStart + j;
-                            _bitmap[f / 64] |= (1UL << (int)(f % 64));
-                            _freeFrames--;
+                            for (int bit = 0; bit < 64; bit++)
+                            {
+                                if ((word & (1UL << bit)) == 0)
+                                {
+                                    ulong frame = (idx * 64) + (ulong)bit;
+                                    if (frame >= _totalFrames) return 0;
+
+                                    _bitmap[idx] |= (1UL << bit);
+                                    _freeFrames--;
+                                    _lastFoundIndex = idx;
+                                    return frame * PageSize;
+                                }
+                            }
                         }
-                        return runStart * PageSize;
+                    }
+                    return 0;
+                }
+
+                ulong run = 0;
+                ulong runStart = 0;
+
+                for (ulong frame = 0; frame < _totalFrames; frame++)
+                {
+                    ulong wordIdx = frame / 64;
+                    int bitIdx = (int)(frame % 64);
+
+                    if ((_bitmap[wordIdx] & (1UL << bitIdx)) == 0)
+                    {
+                        if (run == 0) runStart = frame;
+                        run++;
+                        if (run == count)
+                        {
+                            for (ulong j = 0; j < count; j++)
+                            {
+                                ulong f = runStart + j;
+                                _bitmap[f / 64] |= (1UL << (int)(f % 64));
+                                _freeFrames--;
+                            }
+                            return runStart * PageSize;
+                        }
+                    }
+                    else
+                    {
+                        run = 0;
                     }
                 }
-                else
-                {
-                    run = 0;
-                }
-            }
 
-            return 0;
+                return 0;
+            }
+            finally
+            {
+                s_pmmLock.Release(rflags);
+            }
         }
     }
 }

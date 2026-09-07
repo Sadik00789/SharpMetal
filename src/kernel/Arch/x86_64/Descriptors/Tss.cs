@@ -48,6 +48,13 @@ namespace Kernel.Arch.x86_64.Descriptors
         public static void SetRsp0(ulong rsp0)
         {
             ulong alignedRsp0 = rsp0 & ~15UL;
+            int coreIdx = Hardware.CpuTopology.GetCurrentCoreIndex();
+            Hardware.PerCpuData* perCpu = Hardware.CpuTopology.GetPerCpu(coreIdx);
+            if (perCpu != null)
+            {
+                perCpu->Tss.Rsp0 = alignedRsp0;
+                perCpu->KernelRsp = alignedRsp0;
+            }
             if (Instance != null)
             {
                 Instance->Rsp0 = alignedRsp0;

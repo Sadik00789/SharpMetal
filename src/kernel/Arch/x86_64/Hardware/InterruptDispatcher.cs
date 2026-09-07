@@ -85,6 +85,7 @@ namespace Kernel.Arch.x86_64.Hardware
     public static unsafe class InterruptDispatcher
     {
         public static volatile int TimerTicks = 0;
+        private static Concurrency.TicketSpinLock s_panicLock;
 
         public static VectorNotificationTable VectorNotifications;
 
@@ -112,7 +113,13 @@ namespace Kernel.Arch.x86_64.Hardware
                 return;
             }
 
-            if (ctx->Vector >= 0x30 && ctx->Vector <= 0xFE)
+            if (ctx->Vector == Kernel.Memory.Virtual.SmpTlbShootdown.VectorTlbShootdown)
+            {
+                Kernel.Memory.Virtual.SmpTlbShootdown.HandleTlbShootdownIpi();
+                return;
+            }
+
+            if (ctx->Vector >= 0x30 && ctx->Vector <= 0xFD)
             {
                 int idx = (int)ctx->Vector - 0x30;
                 Kernel.Ipc.Notification* notif = VectorNotifications[idx];
@@ -143,15 +150,25 @@ namespace Kernel.Arch.x86_64.Hardware
                     }
                 }
 
-                EarlySerial.Write("[FAULT] Ring 3 Exception Vector: ");
-                EarlySerial.WriteHex(ctx->Vector);
-                EarlySerial.Write(" ErrorCode: ");
-                EarlySerial.WriteHex(ctx->ErrorCode);
-                EarlySerial.Write(" RIP: ");
-                EarlySerial.WriteHex(ctx->Rip);
-                EarlySerial.Write(" CR2: ");
-                EarlySerial.WriteHex(Cpu.ReadCr2());
-                EarlySerial.WriteLine("");
+                ulong ring3SerRflags = EarlySerial.AcquireLock();
+                EarlySerial.WriteInternal("[FAULT] Ring 3 Exception Vector: ");
+                EarlySerial.WriteHexInternal(ctx->Vector);
+                EarlySerial.WriteInternal(" ErrorCode: ");
+                EarlySerial.WriteHexInternal(ctx->ErrorCode);
+                EarlySerial.WriteInternal(" RIP: ");
+                EarlySerial.WriteHexInternal(ctx->Rip);
+                EarlySerial.WriteInternal(" CR2: ");
+                EarlySerial.WriteHexInternal(Cpu.ReadCr2());
+                EarlySerial.WriteInternal(" Core: ");
+                EarlySerial.WriteDecInternal((long)CpuTopology.GetCurrentCoreIndex());
+                var currRing3 = Kernel.Scheduling.Scheduler.CurrentThread;
+                if (currRing3 != null)
+                {
+                    EarlySerial.WriteInternal(" TID: ");
+                    EarlySerial.WriteDecInternal((long)currRing3->Id);
+                }
+                EarlySerial.WriteInternal("\r\n");
+                EarlySerial.ReleaseLock(ring3SerRflags);
 
                 var current = Kernel.Scheduling.Scheduler.CurrentThread;
                 if (current != null)
@@ -201,15 +218,53 @@ namespace Kernel.Arch.x86_64.Hardware
                 }
             }
 
-            EarlySerial.Write("[FAULT] Kernel Panic Vector: ");
-            EarlySerial.WriteHex(ctx->Vector);
-            EarlySerial.Write(" ErrorCode: ");
-            EarlySerial.WriteHex(ctx->ErrorCode);
-            EarlySerial.Write(" RIP: ");
-            EarlySerial.WriteHex(ctx->Rip);
-            EarlySerial.Write(" CR2: ");
-            EarlySerial.WriteHex(Cpu.ReadCr2());
-            EarlySerial.WriteLine("");
+            ulong serRflags = EarlySerial.AcquireLock();
+
+            EarlySerial.WriteInternal("[FAULT] Kernel Panic Vector: ");
+            EarlySerial.WriteHexInternal(ctx->Vector);
+            EarlySerial.WriteInternal(" ErrorCode: ");
+            EarlySerial.WriteHexInternal(ctx->ErrorCode);
+            EarlySerial.WriteInternal(" RIP: ");
+            EarlySerial.WriteHexInternal(ctx->Rip);
+            EarlySerial.WriteInternal(" CS: ");
+            EarlySerial.WriteHexInternal(ctx->Cs);
+            EarlySerial.WriteInternal(" RSP: ");
+            EarlySerial.WriteHexInternal(ctx->Rsp);
+            EarlySerial.WriteInternal(" CR2: ");
+            EarlySerial.WriteHexInternal(Cpu.ReadCr2());
+            EarlySerial.WriteInternal(" Core: ");
+            EarlySerial.WriteDecInternal((long)CpuTopology.GetCurrentCoreIndex());
+            var curr = Kernel.Scheduling.Scheduler.CurrentThread;
+            if (curr != null)
+            {
+                EarlySerial.WriteInternal(" TID: ");
+                EarlySerial.WriteDecInternal((long)curr->Id);
+            }
+            EarlySerial.WriteInternal("\r\n");
+
+            EarlySerial.WriteInternal("  RAX: "); EarlySerial.WriteHexInternal(ctx->Rax);
+            EarlySerial.WriteInternal(" RCX: "); EarlySerial.WriteHexInternal(ctx->Rcx);
+            EarlySerial.WriteInternal(" RDX: "); EarlySerial.WriteHexInternal(ctx->Rdx);
+            EarlySerial.WriteInternal(" RBX: "); EarlySerial.WriteHexInternal(ctx->Rbx);
+            EarlySerial.WriteInternal("\r\n");
+            EarlySerial.WriteInternal("  RBP: "); EarlySerial.WriteHexInternal(ctx->Rbp);
+            EarlySerial.WriteInternal(" RSI: "); EarlySerial.WriteHexInternal(ctx->Rsi);
+            EarlySerial.WriteInternal(" RDI: "); EarlySerial.WriteHexInternal(ctx->Rdi);
+            EarlySerial.WriteInternal(" RFLAGS: "); EarlySerial.WriteHexInternal(ctx->Rflags);
+            EarlySerial.WriteInternal("\r\n");
+
+            if (ctx->Rsp >= Kernel.Memory.Virtual.Hhdm.Base)
+            {
+                ulong* stk = (ulong*)ctx->Rsp;
+                EarlySerial.WriteInternal("  Stack dump at RSP: ");
+                for (int s = 0; s < 8; s++)
+                {
+                    EarlySerial.WriteHexInternal(stk[s]);
+                    EarlySerial.WriteInternal(" ");
+                }
+                EarlySerial.WriteInternal("\r\n");
+            }
+            EarlySerial.ReleaseLock(serRflags);
 
             while (true)
             {

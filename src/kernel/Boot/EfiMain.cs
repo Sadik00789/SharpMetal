@@ -313,8 +313,8 @@ namespace Kernel.Boot
 
                 // 5. Page Tables
                 PrintScreen(systemTable, "[6/8] Building 4-Level Page Tables...\r\n\0");
-                ulong rawPt = (ulong)(byte*)pPt;
-                ulong alignedPt = (rawPt + 4095) & ~4095UL;
+                ulong ptPhys = DmaArenaAllocator.Allocate(40 * 4096, 4096);
+                ulong alignedPt = ptPhys != 0 ? ptPhys : (((ulong)(byte*)pPt + 4095) & ~4095UL);
                 ulong pml4Phys = VirtualMemorySpace.CreateKernelSpace(
                     (ulong*)alignedPt,
                     KernelHigh.GopPhysBase,

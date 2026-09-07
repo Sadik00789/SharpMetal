@@ -105,7 +105,8 @@ done
     "${QEMU_DRIVE_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
     "${NET_ARGS[@]}" \
-    -m 512M \
+    -smp 4 \
+    -m 4G \
     ${HEADLESS_FLAGS[@]:--display none -serial stdio -no-reboot} \
     -d int,cpu_reset \
     -D "${REPO_ROOT}/qemu.log" \

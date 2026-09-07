@@ -22,7 +22,7 @@ EnterUserMode:
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
+    ; Do not write to gs: writing to gs resets IA32_GS_BASE to 0!
 
     ; 3. Push iretq frame (5 qwords):
     ; [rsp + 32] = User SS:   0x1B (User Data Selector 0x18 | 3)
@@ -43,13 +43,22 @@ EnterUserMode:
 ; User Thread Start Trampoline
 ; Switched into via ContextSwitch ret for newly synthesized user threads.
 ; -----------------------------------------------------------------------------
+extern ReleaseSchedulerLock
+
 UserThreadTrampoline:
+    ; Release scheduler spinlock acquired during context switch
+    sub rsp, 32
+    call ReleaseSchedulerLock
+    add rsp, 32
+
+    cli
+
     ; 1. Load User Data segment selector into segment registers
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
     mov fs, ax
-    mov gs, ax
+    ; Do not write to gs: writing to gs resets IA32_GS_BASE to 0!
 
     ; 2. Stack currently holds 5 iretq qwords (RIP, CS, RFLAGS, RSP, SS)
     ; Pop iretq frame and drop CPL from 0 to 3

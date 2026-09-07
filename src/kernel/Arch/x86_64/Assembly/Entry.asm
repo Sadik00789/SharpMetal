@@ -273,4 +273,152 @@ TripleFaultReset:
     hlt
     jmp .halt
 
+; -----------------------------------------------------------------------------
+; Freestanding Native AOT Atomic Primitives
+; -----------------------------------------------------------------------------
+global AtomicIncrement32
+AtomicIncrement32:
+    mov eax, 1
+    lock xadd dword [rcx], eax
+    inc eax
+    ret
+
+global AtomicDecrement32
+AtomicDecrement32:
+    mov eax, -1
+    lock xadd dword [rcx], eax
+    dec eax
+    ret
+
+global AtomicCompareExchange32
+AtomicCompareExchange32:
+    mov eax, r8d
+    lock cmpxchg dword [rcx], edx
+    ret
+
+global AtomicCompareExchange64
+AtomicCompareExchange64:
+    mov rax, r8
+    lock cmpxchg qword [rcx], rdx
+    ret
+
+global AtomicExchange32
+AtomicExchange32:
+    mov eax, edx
+    xchg dword [rcx], eax
+    ret
+
+global AtomicFetchAndAdd32
+AtomicFetchAndAdd32:
+    mov eax, edx
+    lock xadd dword [rcx], eax
+    ret
+
+global CpuPause
+CpuPause:
+    pause
+    ret
+
+; -----------------------------------------------------------------------------
+; 1-Cycle Per-CPU GS-Base Accessors
+; GS_BASE points to PerCpuData struct:
+; offset 0:  int CoreIndex
+; offset 4:  byte ApicId
+; offset 8:  ThreadControlBlock* CurrentThread
+; offset 16: ulong KernelRsp
+; offset 24: ulong UserRspScratch
+; -----------------------------------------------------------------------------
+global GetCurrentCoreIndex
+GetCurrentCoreIndex:
+    mov eax, [gs:0]
+    ret
+
+global GetCurrentThread
+GetCurrentThread:
+    mov rax, [gs:8]
+    ret
+
+global SetCurrentThread
+SetCurrentThread:
+    mov [gs:8], rcx
+    ret
+
+; -----------------------------------------------------------------------------
+; Application Processor (AP) 64-bit Long Mode Entry Thunk
+; Jumped to by ApTrampoline long64_entry
+; -----------------------------------------------------------------------------
+global ApEntry64
+extern ApStartupHandler
+ApEntry64:
+    ; 1. Enable SSE & AVX in CR4 and CR0 before entering any C# code
+    mov rax, cr4
+    or rax, 0x40600        ; OSFXSR (bit 9), OSXMMEXCPT (bit 10), OSXSAVE (bit 18)
+    mov cr4, rax
+
+    mov rax, cr0
+    and rax, ~4            ; Clear EM (bit 2)
+    or rax, 2              ; Set MP (bit 1)
+    mov cr0, rax
+
+    xor ecx, ecx           ; XCR0
+    mov eax, 7             ; x87 (bit 0) | SSE (bit 1) | AVX (bit 2)
+    xor edx, edx
+    xsetbv
+
+    ; 2. Read Local APIC ID from MMIO (0xFFFF8000FEE00020)
+    mov rdx, 0xFFFF8000FEE00020
+    mov eax, [rdx]
+    shr eax, 24
+    movzx ecx, al          ; ecx = apicId (Windows x64 ABI)
+    movzx edi, al          ; edi = apicId (SysV AMD64 ABI)
+
+    ; Fetch execution stack from ApInitialStacks[apicId]
+    lea rdx, [rel ApInitialStacks]
+    mov rsp, [rdx + rcx*8]
+    and rsp, -16
+    sub rsp, 32            ; 32-byte shadow space (RSP 16-byte aligned before call)
+
+    ; Call C# ApStartupHandler(ulong apicId)
+    call ApStartupHandler
+
+.ap_halt:
+    cli
+    hlt
+    jmp .ap_halt
+
+global GetApEntry64
+GetApEntry64:
+    lea rax, [rel ApEntry64]
+    ret
+
+global SetApInitialStack
+SetApInitialStack:
+    lea r8, [rel ApInitialStacks]
+    mov [r8 + rcx*8], rdx
+    ret
+
+global GetApTrampolineBinary
+GetApTrampolineBinary:
+    lea rax, [rel ApTrampolineBinaryStart]
+    ret
+
+global GetApTrampolineBinarySize
+GetApTrampolineBinarySize:
+    mov rax, ApTrampolineBinaryEnd - ApTrampolineBinaryStart
+    ret
+
+section .data
+global ApInitialStacks
+align 16
+ApInitialStacks:
+    times 16 dq 0
+
+section .rodata
+global ApTrampolineBinaryStart
+global ApTrampolineBinaryEnd
+align 16
+ApTrampolineBinaryStart:
+    incbin "src/kernel/Arch/x86_64/Assembly/ApTrampoline.bin"
+ApTrampolineBinaryEnd:
+
 

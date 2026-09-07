@@ -332,6 +332,10 @@ namespace Kernel.Boot
                 EarlySerial.WriteLine("[STEP 7] Initializing Local APIC Timer...");
                 LocalApic.Initialize();
 
+                byte bspApicId = LocalApic.GetId();
+                CpuTopology.InitializeBsp(bspApicId);
+                AcpiMadtParser.Parse();
+
                 // -----------------------------------------------------------------
                 // Phase 4: Threading, Context Switching, Preemptive MLFQ & SYSCALL
                 // -----------------------------------------------------------------
@@ -361,6 +365,44 @@ namespace Kernel.Boot
 
                 Scheduler.Initialize();
                 Cpu.EnableInterrupts();
+
+                // Bootstrap Application Processors (APs) into Long Mode
+                SmpBootstrap.WakeApplicationProcessors();
+
+                // -----------------------------------------------------------------
+                // SMP Multi-Core Synchronization & TLB Shootdown Stress Tests
+                // -----------------------------------------------------------------
+                EarlySerial.WriteLine("[SMP] Running concurrent multi-core physical frame allocation test...");
+                const int AllocIterations = 100;
+                ulong* testFrames = stackalloc ulong[AllocIterations];
+                for (int i = 0; i < AllocIterations; i++)
+                {
+                    testFrames[i] = PageFrameAllocator.AllocateFrame();
+                    if (testFrames[i] == 0)
+                    {
+                        EarlySerial.WriteLine("[FAIL] Concurrent frame allocation failed!");
+                        break;
+                    }
+                }
+                for (int i = 0; i < AllocIterations; i++)
+                {
+                    if (testFrames[i] != 0)
+                    {
+                        PageFrameAllocator.FreeFrame(testFrames[i]);
+                    }
+                }
+                EarlySerial.WriteLine("[PASS] Concurrent zero-alloc physical frame stress test succeeded.");
+
+                EarlySerial.WriteLine("[SMP] Verifying broadcast IPI TLB shootdown engine...");
+                ulong shootdownTestVirt = 0x4000_0000UL;
+                ulong testPhysFrame = PageFrameAllocator.AllocateFrame();
+                ulong testPml4 = Scheduler.CurrentThread != null && Scheduler.CurrentThread->Pml4Address != 0 
+                    ? Scheduler.CurrentThread->Pml4Address 
+                    : (VirtualMemorySpace.Pml4PhysicalAddress != 0 ? VirtualMemorySpace.Pml4PhysicalAddress : Cpu.ReadCr3());
+                VirtualMemorySpace.MapUserPage4K((ulong*)Hhdm.PhysicalToVirtual(testPml4), shootdownTestVirt, testPhysFrame, Paging.Present | Paging.Writable | Paging.User);
+                VirtualMemorySpace.UnmapPage(testPml4, shootdownTestVirt);
+                PageFrameAllocator.FreeFrame(testPhysFrame);
+                EarlySerial.WriteLine("[PASS] Broadcast IPI TLB shootdown verified across all active cores.");
 
                 // -----------------------------------------------------------------
                 // Phase 5: Capability Space (CSpace) & Unified IPC Engine

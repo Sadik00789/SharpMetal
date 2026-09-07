@@ -4,6 +4,7 @@
     <OutputType>Library</OutputType>
     <AssemblyName>Kernel</AssemblyName>
     <RootNamespace>Kernel</RootNamespace>
+    <NoWarn>$(NoWarn);CS0420</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

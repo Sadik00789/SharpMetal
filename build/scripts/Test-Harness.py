@@ -6,6 +6,9 @@ import os
 import time
 
 REQUIRED_MILESTONES = [
+    r"\[SMP\] 4 cores synchronized and operational",
+    r"\[PASS\] Concurrent zero-alloc physical frame stress test succeeded",
+    r"\[PASS\] Broadcast IPI TLB shootdown verified across all active cores",
     r"\[ROOTTASK\] Initial root CNode initialized",
     r"\[PCI\] Scanning PCIe ECAM bus topology",
     r"\[PCI\] Found Host Bridge",

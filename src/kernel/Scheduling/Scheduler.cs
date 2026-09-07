@@ -3,6 +3,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using Kernel.Arch.x86_64.Descriptors;
 using Kernel.Arch.x86_64.Hardware;
+using Kernel.Concurrency;
 using Kernel.Diagnostics;
 using Kernel.Memory.Heap;
 using Kernel.Memory.Physical;
@@ -23,9 +24,27 @@ namespace Kernel.Scheduling
             }
         }
 
-        public static ThreadControlBlock* CurrentThread;
+        private static SpinLockWithIrqSave s_schedLock;
+
+        public static ThreadControlBlock* CurrentThread
+        {
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            get => (ThreadControlBlock*)Cpu.GetCurrentThread();
+            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            set => Cpu.SetCurrentThread(value);
+        }
+
         public static ThreadControlBlock* MainThread;
-        public static ThreadControlBlock* IdleThread;
+        public static ThreadControlBlock* IdleThread
+        {
+            get
+            {
+                int coreIdx = CpuTopology.GetCurrentCoreIndex();
+                ThreadControlBlock* t = CpuTopology.GetIdleThread(coreIdx);
+                if (t != null) return t;
+                return CpuTopology.GetIdleThread(0);
+            }
+        }
 
         public static ulong NextThreadId = 0;
         public static ulong TotalTicks = 0;
@@ -70,16 +89,29 @@ namespace Kernel.Scheduling
             MainThread->BoundNotification = null;
             MainThread->IpcMessageInfo = 0;
             MainThread->IpcBadge = 0;
+            MainThread->Rflags = 0x202;
 
             CurrentThread = MainThread;
             TaskStateSegment.SetRsp0(MainThread->KernelStackTop);
 
-            // 2. Create Idle thread (TID 1)
+            // 2. Create BSP Idle thread (TID 1)
             delegate* unmanaged[Cdecl]<void> idleEntry = &IdleLoop;
-            IdleThread = CreateThreadInternal(idleEntry, 3, false);
+            ThreadControlBlock* bspIdle = CreateThreadInternal(idleEntry, 3, false);
+            CpuTopology.SetIdleThread(0, bspIdle);
 
             IsRunning = true;
             EarlySerial.WriteLine("[SCHED] Scheduler initialized. Idle and Main threads created.");
+        }
+
+        public static void InitializeAp(int coreIndex)
+        {
+            if (coreIndex < 0 || coreIndex >= CpuTopology.MaxCpus) return;
+
+            delegate* unmanaged[Cdecl]<void> apIdle = &ApIdleLoopThunk;
+            ThreadControlBlock* idle = CreateThreadInternal(apIdle, 3, false);
+            CpuTopology.SetIdleThread(coreIndex, idle);
+            CurrentThread = idle;
+            TaskStateSegment.SetRsp0(idle->KernelStackTop);
         }
 
         public static ThreadControlBlock* CreateThread(delegate* unmanaged[Cdecl]<void> entryPoint, int priority = 0)
@@ -142,9 +174,7 @@ namespace Kernel.Scheduling
 
             if (enqueue)
             {
-                Cpu.DisableInterrupts();
                 EnqueueThread(tcb);
-                Cpu.EnableInterrupts();
             }
 
             return tcb;
@@ -182,7 +212,7 @@ namespace Kernel.Scheduling
             tcb->KernelStackBase = virtStack;
             tcb->KernelStackTop = (virtStack + 16384) & ~15UL;
 
-            // User Thread Stack Synthesis (Adjustment 3):
+            // User Thread Stack Synthesis
             ulong stackTop = tcb->KernelStackTop;
             ulong* sp = (ulong*)(stackTop - 96);
             sp[0] = 0; // r15
@@ -207,15 +237,22 @@ namespace Kernel.Scheduling
 
             tcb->CurrentRsp = (ulong)sp;
 
-            ulong rflags = Cpu.ReadRflags();
-            Cpu.DisableInterrupts();
             EnqueueThread(tcb);
-            Cpu.RestoreRflags(rflags);
 
             return tcb;
         }
 
-        private static void EnqueueThread(ThreadControlBlock* tcb)
+        public static ulong AcquireSchedulerLock()
+        {
+            return s_schedLock.Acquire();
+        }
+
+        public static void ReleaseSchedulerLock(ulong rflags)
+        {
+            s_schedLock.Release(rflags);
+        }
+
+        public static void EnqueueThreadUnlocked(ThreadControlBlock* tcb)
         {
             switch (tcb->Priority)
             {
@@ -226,7 +263,20 @@ namespace Kernel.Scheduling
             }
         }
 
-        private static ThreadControlBlock* DequeueNextReady()
+        private static void EnqueueThread(ThreadControlBlock* tcb)
+        {
+            ulong rflags = s_schedLock.Acquire();
+            try
+            {
+                EnqueueThreadUnlocked(tcb);
+            }
+            finally
+            {
+                s_schedLock.Release(rflags);
+            }
+        }
+
+        private static ThreadControlBlock* DequeueNextReadyUnlocked()
         {
             if (!s_q0.IsEmpty) return s_q0.Dequeue();
             if (!s_q1.IsEmpty) return s_q1.Dequeue();
@@ -235,33 +285,47 @@ namespace Kernel.Scheduling
             return null;
         }
 
+        private static ThreadControlBlock* DequeueNextReady()
+        {
+            ulong rflags = s_schedLock.Acquire();
+            try
+            {
+                return DequeueNextReadyUnlocked();
+            }
+            finally
+            {
+                s_schedLock.Release(rflags);
+            }
+        }
+
         public static void EnqueueReady(ThreadControlBlock* thread)
         {
             if (thread == null) return;
-            Cpu.DisableInterrupts();
             thread->State = ThreadState.Ready;
             EnqueueThread(thread);
-            Cpu.EnableInterrupts();
         }
 
         public static void DirectHandoff(ThreadControlBlock* target)
         {
-            Cpu.DisableInterrupts();
+            ulong rflags = s_schedLock.Acquire();
+            DirectHandoffLocked(target, rflags);
+        }
 
+        public static void DirectHandoffLocked(ThreadControlBlock* target, ulong rflags)
+        {
             if (target == null || target == CurrentThread)
             {
-                Cpu.EnableInterrupts();
+                s_schedLock.Release(rflags);
                 return;
             }
 
             ThreadControlBlock* prev = CurrentThread;
+            ThreadControlBlock* idle = IdleThread;
 
-            // Direct Handoff Queueing: if donating thread remains in Ready or Running state
-            // (e.g. non-blocking sys_send), explicitly re-enqueue it into the MLFQ ready queue
-            if (prev != null && (prev->State == ThreadState.Running || prev->State == ThreadState.Ready))
+            if (prev != null && (prev->State == ThreadState.Running || prev->State == ThreadState.Ready) && prev != idle)
             {
                 prev->State = ThreadState.Ready;
-                EnqueueThread(prev);
+                EnqueueThreadUnlocked(prev);
             }
 
             CurrentThread = target;
@@ -270,29 +334,32 @@ namespace Kernel.Scheduling
             // Update TSS.RSP0 to target thread's kernel stack top
             TaskStateSegment.SetRsp0(target->KernelStackTop);
 
-            // Scheduler CR3 Kernel Fallback: if target->Pml4Address == 0, fall back to kernel master PML4 (s_kernelPml4Phys)
+            // Scheduler CR3 Kernel Fallback
             ulong targetCr3 = target->Pml4Address != 0 ? target->Pml4Address : s_kernelPml4Phys;
             if (targetCr3 != 0 && targetCr3 != Cpu.ReadCr3())
             {
                 Cpu.WriteCr3(targetCr3);
             }
 
+            prev->Rflags = rflags;
+
             // Execute context switch directly from prev to target
             Cpu.ContextSwitch(&prev->CurrentRsp, target->CurrentRsp);
 
-            Cpu.EnableInterrupts();
+            s_schedLock.Release(CurrentThread->Rflags);
         }
 
         public static void Yield()
         {
-            Cpu.DisableInterrupts();
-            if (CurrentThread != null && CurrentThread->State == ThreadState.Running)
+            ulong rflags = s_schedLock.Acquire();
+            ThreadControlBlock* curr = CurrentThread;
+            ThreadControlBlock* idle = IdleThread;
+            if (curr != null && curr->State == ThreadState.Running && curr != idle)
             {
-                CurrentThread->State = ThreadState.Ready;
-                EnqueueThread(CurrentThread);
+                curr->State = ThreadState.Ready;
+                EnqueueThreadUnlocked(curr);
             }
-            ScheduleLocked();
-            Cpu.EnableInterrupts();
+            ScheduleLocked(rflags);
         }
 
         public static void OnTimerTick()
@@ -305,44 +372,43 @@ namespace Kernel.Scheduling
                 BoostAllThreads();
             }
 
-            if (CurrentThread != null && CurrentThread != IdleThread)
+            ThreadControlBlock* curr = CurrentThread;
+            ThreadControlBlock* idle = IdleThread;
+            if (curr != null && curr != idle)
             {
-                CurrentThread->TotalTicks++;
-                CurrentThread->RemainingTicks--;
+                curr->TotalTicks++;
+                curr->RemainingTicks--;
 
-                if (CurrentThread->RemainingTicks <= 0)
+                if (curr->RemainingTicks <= 0)
                 {
-                    // Demote priority level on timeslice exhaustion
-                    if (CurrentThread->Priority < 3)
+                    if (curr->Priority < 3)
                     {
-                        CurrentThread->Priority++;
+                        curr->Priority++;
                     }
-                    CurrentThread->RemainingTicks = GetPriorityTimeslice(CurrentThread->Priority);
-
-                    if (CurrentThread->State == ThreadState.Running)
-                    {
-                        // Timeslice expired: do not ContextSwitch inside ISR stack
-                        // Thread will yield on next cooperative check
-                    }
+                    curr->RemainingTicks = GetPriorityTimeslice(curr->Priority);
                 }
-            }
-            else if (CurrentThread == IdleThread)
-            {
-                // IdleThread yields cooperatively in its own loop
             }
         }
 
         private static void BoostAllThreads()
         {
-            // Promote all threads in Q1, Q2, Q3 to Q0
-            PromoteQueue(ref s_q1);
-            PromoteQueue(ref s_q2);
-            PromoteQueue(ref s_q3);
-
-            if (CurrentThread != null)
+            ulong rflags = s_schedLock.Acquire();
+            try
             {
-                CurrentThread->Priority = 0;
-                CurrentThread->RemainingTicks = GetPriorityTimeslice(0);
+                PromoteQueue(ref s_q1);
+                PromoteQueue(ref s_q2);
+                PromoteQueue(ref s_q3);
+            }
+            finally
+            {
+                s_schedLock.Release(rflags);
+            }
+
+            ThreadControlBlock* curr = CurrentThread;
+            if (curr != null)
+            {
+                curr->Priority = 0;
+                curr->RemainingTicks = GetPriorityTimeslice(0);
             }
         }
 
@@ -359,19 +425,20 @@ namespace Kernel.Scheduling
 
         public static void Schedule()
         {
-            Cpu.DisableInterrupts();
-            ScheduleLocked();
-            Cpu.EnableInterrupts();
+            ulong rflags = s_schedLock.Acquire();
+            ScheduleLocked(rflags);
         }
 
-        private static void ScheduleLocked()
+        public static void ScheduleLocked(ulong rflags)
         {
-            ThreadControlBlock* next = DequeueNextReady();
+            ThreadControlBlock* next = DequeueNextReadyUnlocked();
 
             if (next == null)
             {
-                if (CurrentThread != null && CurrentThread->State == ThreadState.Running)
+                ThreadControlBlock* curr = CurrentThread;
+                if (curr != null && curr->State == ThreadState.Running)
                 {
+                    s_schedLock.Release(rflags);
                     return; // Keep running current thread
                 }
                 next = IdleThread;
@@ -380,6 +447,7 @@ namespace Kernel.Scheduling
             if (next == CurrentThread)
             {
                 next->State = ThreadState.Running;
+                s_schedLock.Release(rflags);
                 return;
             }
 
@@ -390,26 +458,41 @@ namespace Kernel.Scheduling
             // Update TSS.RSP0 to target thread's kernel stack top
             TaskStateSegment.SetRsp0(next->KernelStackTop);
 
-            // Scheduler CR3 Kernel Fallback: if next->Pml4Address == 0, fall back to kernel master PML4 (s_kernelPml4Phys)
+            // Scheduler CR3 Kernel Fallback
             ulong nextCr3 = next->Pml4Address != 0 ? next->Pml4Address : s_kernelPml4Phys;
             if (nextCr3 != 0 && nextCr3 != Cpu.ReadCr3())
             {
                 Cpu.WriteCr3(nextCr3);
             }
 
+            prev->Rflags = rflags;
+
             // Execute assembly context switch
             Cpu.ContextSwitch(&prev->CurrentRsp, next->CurrentRsp);
+
+            s_schedLock.Release(CurrentThread->Rflags);
         }
 
         public static void TerminateCurrentThread()
         {
-            Cpu.DisableInterrupts();
-            if (CurrentThread != null)
+            ulong rflags = s_schedLock.Acquire();
+            ThreadControlBlock* curr = CurrentThread;
+            if (curr != null)
             {
-                CurrentThread->State = ThreadState.Dead;
+                curr->State = ThreadState.Dead;
             }
-            ScheduleLocked();
-            Cpu.EnableInterrupts();
+            ScheduleLocked(rflags);
+        }
+
+        public static void UnlockScheduler()
+        {
+            s_schedLock.Release(0x202);
+        }
+
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ReleaseSchedulerLock")]
+        public static void ReleaseSchedulerLock()
+        {
+            UnlockScheduler();
         }
 
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
@@ -420,7 +503,7 @@ namespace Kernel.Scheduling
                 Cpu.EnableInterrupts();
                 if (!s_q0.IsEmpty || !s_q1.IsEmpty || !s_q2.IsEmpty || !s_q3.IsEmpty)
                 {
-                    Yield();
+                    Schedule();
                 }
                 else
                 {
@@ -429,13 +512,36 @@ namespace Kernel.Scheduling
             }
         }
 
+        [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]
+        public static void ApIdleLoopThunk()
+        {
+            RunApIdleLoop();
+        }
+
+        public static void RunApIdleLoop()
+        {
+            while (true)
+            {
+                Cpu.EnableInterrupts();
+                if (!s_q0.IsEmpty || !s_q1.IsEmpty || !s_q2.IsEmpty || !s_q3.IsEmpty)
+                {
+                    Schedule();
+                }
+                else
+                {
+                    Cpu.Pause();
+                }
+            }
+        }
+
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ThreadEntryPointRunner")]
         public static void ThreadEntryPointRunner()
         {
-            Cpu.EnableInterrupts();
-            if (CurrentThread != null && CurrentThread->EntryPoint != null)
+            UnlockScheduler();
+            ThreadControlBlock* curr = CurrentThread;
+            if (curr != null && curr->EntryPoint != null)
             {
-                CurrentThread->EntryPoint();
+                curr->EntryPoint();
             }
             TerminateCurrentThread();
         }

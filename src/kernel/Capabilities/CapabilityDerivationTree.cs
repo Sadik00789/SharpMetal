@@ -1,4 +1,5 @@
 using System;
+using Kernel.Concurrency;
 using Kernel.Memory.Heap;
 using Kernel.Memory.Virtual;
 using Microkernel.Abstractions.Capabilities;
@@ -17,33 +18,67 @@ namespace Kernel.Capabilities
 
     public static unsafe class CapabilityDerivationTree
     {
+        private static SpinLockWithIrqSave s_cdtLock;
+
         public static CdtNode* CreateNode(CNode* cnode, uint slot)
         {
-            CdtNode* node = (CdtNode*)SlabAllocator.KmAlloc((ulong)sizeof(CdtNode));
-            if (node == null) return null;
-            node->CNode = cnode;
-            node->Slot = slot;
-            node->Parent = null;
-            node->FirstChild = null;
-            node->NextSibling = null;
-            node->PrevSibling = null;
-            return node;
+            ulong rflags = s_cdtLock.Acquire();
+            try
+            {
+                CdtNode* node = (CdtNode*)SlabAllocator.KmAlloc((ulong)sizeof(CdtNode));
+                if (node == null) return null;
+                node->CNode = cnode;
+                node->Slot = slot;
+                node->Parent = null;
+                node->FirstChild = null;
+                node->NextSibling = null;
+                node->PrevSibling = null;
+                return node;
+            }
+            finally
+            {
+                s_cdtLock.Release(rflags);
+            }
         }
 
         public static void Derive(CdtNode* parent, CdtNode* child)
         {
             if (parent == null || child == null) return;
-            child->Parent = parent;
-            child->NextSibling = parent->FirstChild;
-            child->PrevSibling = null;
-            if (parent->FirstChild != null)
+
+            ulong rflags = s_cdtLock.Acquire();
+            try
             {
-                parent->FirstChild->PrevSibling = child;
+                child->Parent = parent;
+                child->NextSibling = parent->FirstChild;
+                child->PrevSibling = null;
+                if (parent->FirstChild != null)
+                {
+                    parent->FirstChild->PrevSibling = child;
+                }
+                parent->FirstChild = child;
             }
-            parent->FirstChild = child;
+            finally
+            {
+                s_cdtLock.Release(rflags);
+            }
         }
 
         public static void Revoke(CdtNode* node)
+        {
+            if (node == null) return;
+
+            ulong rflags = s_cdtLock.Acquire();
+            try
+            {
+                RevokeInternal(node);
+            }
+            finally
+            {
+                s_cdtLock.Release(rflags);
+            }
+        }
+
+        private static void RevokeInternal(CdtNode* node)
         {
             if (node == null) return;
 
@@ -51,8 +86,8 @@ namespace Kernel.Capabilities
             while (currChild != null)
             {
                 CdtNode* next = currChild->NextSibling;
-                Revoke(currChild);
-                Delete(currChild);
+                RevokeInternal(currChild);
+                DeleteInternal(currChild);
                 currChild = next;
             }
             node->FirstChild = null;
@@ -62,8 +97,23 @@ namespace Kernel.Capabilities
         {
             if (node == null) return;
 
+            ulong rflags = s_cdtLock.Acquire();
+            try
+            {
+                DeleteInternal(node);
+            }
+            finally
+            {
+                s_cdtLock.Release(rflags);
+            }
+        }
+
+        private static void DeleteInternal(CdtNode* node)
+        {
+            if (node == null) return;
+
             // Recurse through derived child nodes first
-            Revoke(node);
+            RevokeInternal(node);
 
             // Unlink from sibling / parent list
             if (node->PrevSibling != null)
@@ -103,15 +153,23 @@ namespace Kernel.Capabilities
         public static void RevokeSlot(CNode* cnode, uint slot)
         {
             if (cnode == null || slot >= CNode.SlotCount) return;
-            Capability* cap = cnode->Get(slot);
-            if (cap == null || cap->IsNull) return;
-
-            if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
-                cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
+            ulong rflags = s_cdtLock.Acquire();
+            try
             {
-                VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
-                cap->MappedVirtualAddress = 0;
-                cap->OwnerProcess = null;
+                Capability* cap = cnode->Get(slot);
+                if (cap == null || cap->IsNull) return;
+
+                if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                    cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
+                {
+                    VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
+                    cap->MappedVirtualAddress = 0;
+                    cap->OwnerProcess = null;
+                }
+            }
+            finally
+            {
+                s_cdtLock.Release(rflags);
             }
         }
     }

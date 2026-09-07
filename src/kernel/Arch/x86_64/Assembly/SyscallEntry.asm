@@ -13,14 +13,15 @@ extern DispatchSyscall
 ; Configured in LSTAR; hardware transitions to this point upon 'syscall'.
 ; -----------------------------------------------------------------------------
 SyscallEntry:
-    ; 1. Atomic Stack Swap:
-    ; Save incoming user RSP to per-CPU scratch variable and switch to KernelStackTop
-    mov [rel SyscallUserRsp], rsp
-    mov rsp, [rel SyscallKernelRsp]
+    ; 1. Atomic Stack Swap via per-CPU GS base:
+    ; gs:[24] = UserRspScratch
+    ; gs:[16] = KernelRsp
+    mov [gs:24], rsp
+    mov rsp, [gs:16]
 
     ; 2. Preserve user context on the kernel stack:
     ; Hardware saves user RIP -> RCX, user RFLAGS -> R11
-    push qword [rel SyscallUserRsp]
+    push qword [gs:24]
     push rcx
     push r11
 
@@ -57,6 +58,9 @@ SyscallEntry:
 
     ; 4. Dispatch to C# handler
     call DispatchSyscall
+
+    ; Disable interrupts before popping registers and restoring user RSP
+    cli
 
     add rsp, 72
 
@@ -127,15 +131,8 @@ GetSyscallEntry:
 
 ; -----------------------------------------------------------------------------
 ; void SetSyscallKernelRsp(ulong rsp0)
-; Sets the kernel stack pointer to switch to upon syscall from Ring 3
+; Sets the per-CPU kernel stack pointer to switch to upon syscall from Ring 3
 ; -----------------------------------------------------------------------------
 SetSyscallKernelRsp:
-    mov [rel SyscallKernelRsp], rcx
+    mov [gs:16], rcx
     ret
-
-section .data
-global SyscallUserRsp
-global SyscallKernelRsp
-align 16
-SyscallUserRsp:   dq 0
-SyscallKernelRsp: dq 0

@@ -20,7 +20,7 @@ namespace Kernel.Ipc
 
         public void Signal(ulong badge)
         {
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
 
             State |= badge;
 
@@ -49,21 +49,22 @@ namespace Kernel.Ipc
                 waiter->IpcMessageInfo = IpcMessageHeader.AsyncNotification;
 
                 // Unblock and enqueue waiter
-                Scheduler.EnqueueReady(waiter);
+                waiter->State = ThreadState.Ready;
+                Scheduler.EnqueueThreadUnlocked(waiter);
             }
 
-            Cpu.EnableInterrupts();
+            Scheduler.ReleaseSchedulerLock(rflags);
         }
 
         public ulong Wait()
         {
-            Cpu.DisableInterrupts();
+            ulong rflags = Scheduler.AcquireSchedulerLock();
 
             if (State != 0)
             {
                 ulong mask = State;
                 State = 0;
-                Cpu.EnableInterrupts();
+                Scheduler.ReleaseSchedulerLock(rflags);
                 return mask;
             }
 
@@ -71,11 +72,10 @@ namespace Kernel.Ipc
             WaitingThread = current;
             current->State = ThreadState.BlockedOnNotification;
 
-            Scheduler.Schedule();
+            Scheduler.ScheduleLocked(rflags);
 
             // When resumed, payload is in current->IpcRegisters.D0
             ulong deliveredMask = current->IpcRegisters.D0;
-            Cpu.EnableInterrupts();
             return deliveredMask;
         }
     }
