@@ -76,7 +76,7 @@ namespace Kernel.Arch.x86_64.Hardware
         public static extern ulong* GetIsrThunkTable();
 
         [DllImport("*")]
-        public static extern void ContextSwitch(ulong* oldRspOut, ulong newRsp);
+        public static extern void ContextSwitch(ulong* prevRsp, ulong nextRsp, int* prevIsExecuting = null);
 
         [DllImport("*")]
         public static extern ulong DoSyscall(ulong num, ulong a1, ulong a2, ulong a3, ulong a4, ulong a5, ulong a6);

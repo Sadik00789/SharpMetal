@@ -28,6 +28,14 @@ ContextSwitch:
     ; 3. Load new RSP from rdx
     mov rsp, rdx
 
+
+    ; SMP: Stack vacated, release execution guard for other cores
+    test r8, r8
+    jz .skip_guard_clear
+    mov dword [r8], 0
+    mfence
+
+.skip_guard_clear:
     ; 4. Pop callee-saved registers in reverse order
     pop r15
     pop r14

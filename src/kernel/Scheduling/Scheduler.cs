@@ -133,7 +133,9 @@ namespace Kernel.Scheduling
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
+            tcb->IsExecuting = 0;
             tcb->RemainingTicks = GetPriorityTimeslice(priority);
+            tcb->IsExecuting = 0;
             tcb->TotalTicks = 0;
             tcb->EntryPoint = entryPoint;
             tcb->CSpaceRoot = MainThread != null ? MainThread->CSpaceRoot : null;
@@ -189,7 +191,9 @@ namespace Kernel.Scheduling
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
+            tcb->IsExecuting = 0;
             tcb->RemainingTicks = GetPriorityTimeslice(priority);
+            tcb->IsExecuting = 0;
             tcb->TotalTicks = 0;
             tcb->EntryPoint = null;
 
@@ -319,6 +323,12 @@ namespace Kernel.Scheduling
                 return;
             }
 
+            // Spin until target is not executing on any other core
+            while (Concurrency.Atomic.CompareExchange(ref target->IsExecuting, 1, 0) != 0)
+            {
+                Cpu.Pause();
+            }
+
             ThreadControlBlock* prev = CurrentThread;
             ThreadControlBlock* idle = IdleThread;
 
@@ -331,10 +341,8 @@ namespace Kernel.Scheduling
             CurrentThread = target;
             target->State = ThreadState.Running;
 
-            // Update TSS.RSP0 to target thread's kernel stack top
             TaskStateSegment.SetRsp0(target->KernelStackTop);
 
-            // Scheduler CR3 Kernel Fallback
             ulong targetCr3 = target->Pml4Address != 0 ? target->Pml4Address : s_kernelPml4Phys;
             if (targetCr3 != 0 && targetCr3 != Cpu.ReadCr3())
             {
@@ -343,8 +351,7 @@ namespace Kernel.Scheduling
 
             prev->Rflags = rflags;
 
-            // Execute context switch directly from prev to target
-            Cpu.ContextSwitch(&prev->CurrentRsp, target->CurrentRsp);
+            Cpu.ContextSwitch(&prev->CurrentRsp, target->CurrentRsp, (prev != null) ? (int*)&prev->IsExecuting : null);
 
             s_schedLock.Release(CurrentThread->Rflags);
         }
@@ -447,13 +454,21 @@ namespace Kernel.Scheduling
             if (next == CurrentThread)
             {
                 next->State = ThreadState.Running;
+        next->IsExecuting = 1;
                 s_schedLock.Release(rflags);
                 return;
+            }
+
+            // Spin until next thread stack is fully vacated by any other core
+            while (Concurrency.Atomic.CompareExchange(ref next->IsExecuting, 1, 0) != 0)
+            {
+                Cpu.Pause();
             }
 
             ThreadControlBlock* prev = CurrentThread;
             CurrentThread = next;
             next->State = ThreadState.Running;
+        next->IsExecuting = 1;
 
             // Update TSS.RSP0 to target thread's kernel stack top
             TaskStateSegment.SetRsp0(next->KernelStackTop);
@@ -468,7 +483,7 @@ namespace Kernel.Scheduling
             prev->Rflags = rflags;
 
             // Execute assembly context switch
-            Cpu.ContextSwitch(&prev->CurrentRsp, next->CurrentRsp);
+            Cpu.ContextSwitch(&prev->CurrentRsp, next->CurrentRsp, (prev != null) ? (int*)&prev->IsExecuting : null);
 
             s_schedLock.Release(CurrentThread->Rflags);
         }
@@ -480,6 +495,25 @@ namespace Kernel.Scheduling
             if (curr != null)
             {
                 curr->State = ThreadState.Dead;
+                
+                // Release execution guard so other cores don't spin-deadlock or fault
+                curr->IsExecuting = 0;
+
+                // Unblock any client waiting for a reply from this dying server thread
+                if (curr->ReplyTarget != null)
+                {
+                    ThreadControlBlock* client = curr->ReplyTarget;
+                    if (client->State == ThreadState.BlockedOnReply)
+                    {
+                        client->IpcRegisters.D0 = unchecked((ulong)-1);
+                        client->State = ThreadState.Ready;
+                        EnqueueThreadUnlocked(client);
+                    }
+                    curr->ReplyTarget = null;
+                }
+                
+                curr->BoundEndpoint = null;
+                curr->BoundNotification = null;
             }
             ScheduleLocked(rflags);
         }
