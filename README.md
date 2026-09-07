@@ -3,7 +3,7 @@
 [![CI](https://github.com/sadik00789/SharpMetal/actions/workflows/test-qemu.yml/badge.svg)](https://github.com/sadik00789/SharpMetal/actions)
 [![Release](https://img.shields.io/github/v/release/sadik00789/SharpMetal?color=brightgreen)](https://github.com/sadik00789/SharpMetal/releases/latest)
 [![Architecture](https://img.shields.io/badge/Architecture-x86--64-blue.svg)](https://en.wikipedia.org/wiki/X86-64)
-[![SMP](https://img.shields.io/badge/SMP-4--Core%20Symmetric%20Multiprocessing-teal.svg)]()
+[![SMP](https://img.shields.io/badge/SMP-Dynamic%20Multiprocessing%20%28ACPI%20MADT%29-teal.svg)]()
 [![Runtime](https://img.shields.io/badge/.NET%209-Native%20AOT%20Freestanding-512BD4.svg)](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
 [![Firmware](https://img.shields.io/badge/Firmware-UEFI%202.x%20Direct-brightgreen.svg)](https://uefi.org/)
 [![IPC](https://img.shields.io/badge/IPC-Capability--Based%20%28seL4--Style%29-orange.svg)]()
@@ -92,7 +92,7 @@ graph TD
 | **1** | **Firmware Boot & Memory Map** | Direct UEFI 2.x application boot (`BOOTX64.EFI`) via `EfiMain.cs`. Resolves GOP framebuffer, parses ACPI RSDP, locates `INITRD.IMG`, extracts memory descriptors, and executes `ExitBootServices` with zero post-exit allocations. |
 | **2** | **Higher-Half Handover & Paging** | Creates identity and higher-half direct map (HHDM) 4-level page tables at `0xFFFF_8000_0000_0000`. Programs IA32_PAT for Write-Combining (WC) on GOP framebuffer and jumps to higher-half `KernelMainHigh`. |
 | **3** | **Hardware Descriptors & Slab Heap** | Installs 64-bit Global Descriptor Table (GDT), 256-gate Interrupt Descriptor Table (IDT), per-core Task State Segment (TSS) with isolated 16 KiB RSP0 stacks, masks 8259 PIC, parses ACPI MADT for multi-core topology, programs Local APIC timer, and initializes multi-pool slab allocator. |
-| **4** | **Threading & Preemptive MLFQ** | Implements 4-Core SMP preemptive Multi-Level Feedback Queue scheduler with 4 priority levels, AP INIT-SIPI-SIPI bootstrap, broadcast IPI TLB shootdown engine (`0xFD`), round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`, `IA32_GS_BASE`) for `SYSCALL`/`SYSRET`. |
+| **4** | **Threading & Preemptive MLFQ** | Implements Dynamic SMP preemptive Multi-Level Feedback Queue scheduler (supporting up to 16 cores dynamically enumerated via ACPI MADT) with 4 priority levels, AP INIT-SIPI-SIPI bootstrap, broadcast IPI TLB shootdown engine (`0xFD`), round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`, `IA32_GS_BASE`) for `SYSCALL`/`SYSRET`. |
 | **5** | **Capability Space (CSpace) & CDT** | seL4-inspired authorization model. Resources (threads, endpoints, notifications, page frames, CNodes) are referenced via guarded capability pointers (`cptr`) with cryptographic badges and access rights (`Read`, `Write`, `Call`, `Grant`). Features a zero-alloc Capability Derivation Tree (CDT) enforcing recursive capability revocation and synchronous virtual memory unmapping/TLB invalidation. |
 | **6** | **Unified IPC Engine** | Dual-mode IPC supporting zero-copy synchronous rendezvous with timeslice donation (`sys_call`/`sys_reply`), 64-bit atomic asynchronous notifications (`sys_notify`), and unified dual-wait reactors (`sys_recv_any`). |
 | **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq`. |
@@ -217,8 +217,8 @@ To eliminate dangling frame pointers and stale address translations:
 - Memory capabilities register parent-child lineages inside a zero-alloc `CapabilityDerivationTree` (CDT).
 - Revoking or deleting a frame capability synchronously traverses the owning process's 4-level paging hierarchy (PML4 -> PDPT -> PD -> PT), zeros the PTE, strips `PTE_GLOBAL`, and issues `Cpu.Invlpg` shootdowns before reclaiming the capability slot.
 
-### 7. 4-Core SMP Bootstrap & Hardware TSS Isolation
-- **Application Processor (AP) Trampoline**: Wakes AP cores via standard INIT-SIPI-SIPI sequences targeting a 16-bit real-mode trampoline staged at physical `0x0000_8000`, switching through protected mode into 64-bit long mode.
+### 7. Dynamic SMP Multiprocessing & Hardware TSS Isolation
+- **Dynamic Core Discovery & AP Trampoline**: Automatically detects core topology and Local APIC IDs via ACPI MADT tables (supporting up to 16 cores dynamically). Wakes Application Processors (APs) via standard INIT-SIPI-SIPI sequences targeting a 16-bit real-mode trampoline staged at physical `0x0000_8000`, switching through protected mode into 64-bit long mode.
 - **Strict Higher-Half Descriptors**: To guarantee faultless Ring 3 operation where PML4[0] is unmapped, all GDT, IDT, and TSS base structures and `PerCpuData` pointers (`IA32_GS_BASE`) reside strictly in canonical higher-half virtual memory (`Hhdm.Base`).
 - **Independent Task State Segments**: Each core maintains its own isolated TSS and 16 KiB interrupt stack. `TaskStateSegment.SetRsp0` exclusively updates the calling core's `TSS.Rsp0` and `KernelRsp`, preventing cross-core stack corruption during thread context switches.
 - **Atomic Serialization**: High-throughput `SysLog` calls use whole-message locking via `SpinLockWithIrqSave`, completely preventing concurrent inter-core character interleaving on early serial outputs.
@@ -335,7 +335,7 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 
 ## Verification & Test Results
 
-The headless test harness confirms operational integrity across all 12 microkernel layers and 4 SMP cores:
+The headless test harness confirms operational integrity across all 12 microkernel layers and active SMP cores (demonstrated with 4 vCPUs in default CI harness):
 
 ```
 =================================================================
