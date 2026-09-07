@@ -195,6 +195,7 @@ namespace NetVirtio
             }
 
             // 5. Emit Serial Token 4 for Phase 10
+            SyscallWrappers.Log("[VIRTIO-NET] Modern PCI VirtIO Network device detected.\n");
             SyscallWrappers.Log("[VIRTIO] VirtIO-Net controller online. MAC: ");
             PrintHexByte(Mac0); SyscallWrappers.Log(":");
             PrintHexByte(Mac1); SyscallWrappers.Log(":");

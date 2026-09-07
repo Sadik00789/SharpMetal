@@ -36,7 +36,12 @@ namespace DisplayServer.Compositor
             }
             else
             {
-                SyscallWrappers.Log("[DISPLAY] ERROR: GopPhysBase or GopFbSize is ZERO!\n");
+                SyscallWrappers.Log("[DISPLAY] Headless mode: Allocating dummy fallback framebuffer.\n");
+                Width = 1024;
+                Height = 768;
+                Pitch = 1024;
+                FbSize = 1024 * 768 * 4;
+                SyscallWrappers.AllocDma(FbSize, FramebufferVirt);
             }
         }
 

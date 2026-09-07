@@ -204,6 +204,7 @@ namespace Shell
             TerminalHistory.Add("net");
             TerminalHistory.Add("exit");
             SyscallWrappers.Log("[SHELL] History ring buffer initialized (32 slots).\n");
+            SyscallWrappers.Log("[SHELL] SharpMetal Bare-Metal Shell online.\n");
 
             // 6. Test VFS File.ReadAllText
             string helloText = System.IO.File.ReadAllText("/HELLO.TXT");

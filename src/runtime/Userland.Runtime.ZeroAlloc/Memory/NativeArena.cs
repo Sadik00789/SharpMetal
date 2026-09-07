@@ -2,47 +2,84 @@ using System;
 
 namespace Userland.Runtime.ZeroAlloc.Memory
 {
-    public unsafe struct NativeArena
+    public unsafe struct ArenaChunk
     {
-        public byte* Buffer;
-        public nuint Capacity;
-        public nuint Offset;
+        public ArenaChunk* Next;
+        public ulong Size;
+        public ulong Allocated;
+        public byte* Data;
+    }
 
-        public void Initialize(byte* buffer, nuint capacity)
+    public static unsafe class NativeArena
+    {
+        private const ulong DefaultChunkSize = 64 * 1024; // 64 KiB
+        private static ulong s_nextDmaVirt = 0x0000_7000_0000_0000UL;
+        
+        public static ArenaChunk* FirstChunk = null;
+        public static ArenaChunk* CurrentChunk = null;
+
+        public static void Initialize(byte* initialBuffer, ulong initialCapacity)
         {
-            Buffer = buffer;
-            Capacity = capacity;
-            Offset = 0;
+            ArenaChunk* chunk = (ArenaChunk*)initialBuffer;
+            chunk->Next = null;
+            chunk->Size = initialCapacity - (ulong)sizeof(ArenaChunk);
+            chunk->Allocated = 0;
+            chunk->Data = initialBuffer + sizeof(ArenaChunk);
+
+            FirstChunk = chunk;
+            CurrentChunk = chunk;
         }
 
-        public void* Allocate(nuint size, nuint alignment = 16)
+        public static void* Allocate(nuint size, nuint alignment = 16)
         {
-            if (Buffer == null || size == 0) return null;
+            if (CurrentChunk == null) return null;
 
-            nuint currentPtr = (nuint)(Buffer + Offset);
-            nuint alignedPtr = (currentPtr + (alignment - 1)) & ~(alignment - 1);
-            nuint padding = alignedPtr - currentPtr;
-
-            if (Offset + padding + size > Capacity)
+            ulong alignedAlloc = (CurrentChunk->Allocated + (alignment - 1)) & ~(alignment - 1);
+            if (alignedAlloc + size <= CurrentChunk->Size)
             {
-                return null; // Out of memory in arena
+                void* ptr = CurrentChunk->Data + alignedAlloc;
+                CurrentChunk->Allocated = alignedAlloc + size;
+                return ptr;
             }
 
-            Offset += padding + size;
-            return (void*)alignedPtr;
+            // Chunk exhausted: expand arena via dynamic DMA mapping
+            ulong required = size + alignment + (ulong)sizeof(ArenaChunk);
+            ulong chunkSize = required > DefaultChunkSize ? (required + 0xFFFUL) & ~0xFFFUL : DefaultChunkSize;
+
+            ulong targetVirt = s_nextDmaVirt;
+            s_nextDmaVirt += chunkSize;
+
+            ulong phys = Interop.SyscallWrappers.AllocDma(chunkSize, targetVirt);
+            if (phys == 0) return null;
+
+            ArenaChunk* newChunk = (ArenaChunk*)targetVirt;
+            newChunk->Next = null;
+            newChunk->Size = chunkSize - (ulong)sizeof(ArenaChunk);
+            newChunk->Allocated = 0;
+            newChunk->Data = (byte*)targetVirt + sizeof(ArenaChunk);
+
+            CurrentChunk->Next = newChunk;
+            CurrentChunk = newChunk;
+
+            alignedAlloc = (CurrentChunk->Allocated + (alignment - 1)) & ~(alignment - 1);
+            CurrentChunk->Allocated = alignedAlloc + size;
+            return CurrentChunk->Data + alignedAlloc;
         }
 
-        public void* AllocateChunk(nuint chunkSize)
+        public static void* AllocateChunk(nuint chunkSize)
         {
             return Allocate(chunkSize, 16);
         }
 
-        public void Reset()
+        public static void Reset()
         {
-            Offset = 0;
+            ArenaChunk* curr = FirstChunk;
+            while (curr != null)
+            {
+                curr->Allocated = 0;
+                curr = curr->Next;
+            }
+            CurrentChunk = FirstChunk;
         }
-
-        public nuint AllocatedBytes => Offset;
-        public nuint RemainingBytes => Capacity >= Offset ? Capacity - Offset : 0;
     }
 }

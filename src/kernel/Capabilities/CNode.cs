@@ -51,14 +51,28 @@ namespace Kernel.Capabilities
 
         public void Revoke(uint slot)
         {
-            if (slot < SlotCount && Slots != null)
+            if (slot >= SlotCount || Slots == null) return;
+            Capability* cap = &Slots[slot];
+            if (cap->IsNull) return;
+
+            if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
             {
-                Slots[slot].TargetObject = null;
-                Slots[slot].Type = CapabilityType.Null;
-                Slots[slot].Rights = CapabilityRights.None;
-                Slots[slot].Badge = 0;
-                Slots[slot].Reserved = 0;
+                VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
+                cap->MappedVirtualAddress = 0;
+                cap->OwnerProcess = null;
             }
+
+            Slots[slot].TargetObject = null;
+            Slots[slot].Type = CapabilityType.Null;
+            Slots[slot].Rights = CapabilityRights.None;
+            Slots[slot].Badge = 0;
+            Slots[slot].Reserved = 0;
+        }
+
+        public void Delete(uint slot)
+        {
+            Revoke(slot);
         }
     }
 }

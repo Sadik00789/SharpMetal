@@ -31,6 +31,11 @@ namespace NetVirtio
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "VirtioNetMain")]
         public static void Main()
         {
+            for (int i = 0; i < 8; i++)
+            {
+                SyscallWrappers.Yield();
+            }
+
             // Initialize VirtIO Modern Network device and configure virtqueues
             VirtioNetDriver.Initialize();
 

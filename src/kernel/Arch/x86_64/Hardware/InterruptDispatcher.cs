@@ -38,9 +38,65 @@ namespace Kernel.Arch.x86_64.Hardware
         public ulong Ss;
     }
 
-    public static class InterruptDispatcher
+    public unsafe struct VectorNotificationTable
+    {
+        public fixed ulong NotificationPointers[208];
+        public fixed ulong Badges[208];
+
+        public Kernel.Ipc.Notification* this[int index]
+        {
+            get
+            {
+                if (index < 0 || index >= 208) return null;
+                fixed (ulong* p = NotificationPointers)
+                {
+                    return (Kernel.Ipc.Notification*)p[index];
+                }
+            }
+            set
+            {
+                if (index < 0 || index >= 208) return;
+                fixed (ulong* p = NotificationPointers)
+                {
+                    p[index] = (ulong)value;
+                }
+            }
+        }
+
+        public ulong GetBadge(int index)
+        {
+            if (index < 0 || index >= 208) return 0;
+            fixed (ulong* p = Badges)
+            {
+                return p[index];
+            }
+        }
+
+        public void SetBadge(int index, ulong badge)
+        {
+            if (index < 0 || index >= 208) return;
+            fixed (ulong* p = Badges)
+            {
+                p[index] = badge;
+            }
+        }
+    }
+
+    public static unsafe class InterruptDispatcher
     {
         public static volatile int TimerTicks = 0;
+
+        public static VectorNotificationTable VectorNotifications;
+
+        public static void RegisterVector(byte vector, Kernel.Ipc.Notification* notif, ulong badge = 0)
+        {
+            if (vector >= 0x30 && vector <= 0xFE)
+            {
+                int idx = (int)vector - 0x30;
+                VectorNotifications[idx] = notif;
+                VectorNotifications.SetBadge(idx, badge != 0 ? badge : (1UL << (idx & 0x3F)));
+            }
+        }
 
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "DispatchInterrupt")]
         public static unsafe void DispatchInterrupt(InterruptContext* ctx)
@@ -53,6 +109,20 @@ namespace Kernel.Arch.x86_64.Hardware
                 {
                     Kernel.Scheduling.Scheduler.OnTimerTick();
                 }
+                return;
+            }
+
+            if (ctx->Vector >= 0x30 && ctx->Vector <= 0xFE)
+            {
+                int idx = (int)ctx->Vector - 0x30;
+                Kernel.Ipc.Notification* notif = VectorNotifications[idx];
+                if (notif != null)
+                {
+                    ulong badge = VectorNotifications.GetBadge(idx);
+                    if (badge == 0) badge = 1UL << (idx & 0x3F);
+                    notif->Signal(badge);
+                }
+                LocalApic.SendEoi();
                 return;
             }
 

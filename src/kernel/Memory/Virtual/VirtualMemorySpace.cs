@@ -99,6 +99,9 @@ namespace Kernel.Memory.Virtual
 
         public static void MapUserPage4K(ulong* pml4, ulong virt, ulong phys, ulong flags)
         {
+            // Assert that userland page mappings never set PTE_GLOBAL (bit 8)
+            flags &= ~Paging.Global;
+
             int pml4Idx = Paging.GetPml4Index(virt);
             int pdptIdx = Paging.GetPdptIndex(virt);
             int pdIdx   = Paging.GetPdIndex(virt);
@@ -289,6 +292,32 @@ namespace Kernel.Memory.Virtual
             if (isCurrentCr3)
             {
                 Cpu.WriteCr3(userPml4Phys);
+            }
+        }
+
+        public static unsafe void UnmapPage(ulong pml4Phys, ulong vaddr)
+        {
+            if (pml4Phys == 0) return;
+            ulong* pml4 = (ulong*)Hhdm.PhysicalToVirtual(pml4Phys);
+            ulong pml4Idx = (vaddr >> 39) & 0x1FF;
+            if ((pml4[pml4Idx] & 1) == 0) return;
+
+            ulong* pdpt = (ulong*)Hhdm.PhysicalToVirtual(pml4[pml4Idx] & 0x000F_FFFF_FFFF_F000UL);
+            ulong pdptIdx = (vaddr >> 30) & 0x1FF;
+            if ((pdpt[pdptIdx] & 1) == 0) return;
+
+            ulong* pd = (ulong*)Hhdm.PhysicalToVirtual(pdpt[pdptIdx] & 0x000F_FFFF_FFFF_F000UL);
+            ulong pdIdx = (vaddr >> 21) & 0x1FF;
+            if ((pd[pdIdx] & 1) == 0) return;
+
+            ulong* pt = (ulong*)Hhdm.PhysicalToVirtual(pd[pdIdx] & 0x000F_FFFF_FFFF_F000UL);
+            ulong ptIdx = (vaddr >> 12) & 0x1FF;
+            
+            pt[ptIdx] = 0; // Clear PTE
+
+            if (Cpu.ReadCr3() == pml4Phys)
+            {
+                Cpu.Invlpg(vaddr);
             }
         }
 

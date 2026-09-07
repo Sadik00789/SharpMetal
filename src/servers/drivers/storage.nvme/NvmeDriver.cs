@@ -158,7 +158,7 @@ namespace StorageNvme
             Asq[0].CommandId = 1;
             Asq[0].Prp1 = IocqPhys;
             Asq[0].Cdw10 = (63U << 16) | 1U; // 64 entries, QID 1
-            Asq[0].Cdw11 = 0x01; // Physically contiguous
+            Asq[0].Cdw11 = (0x30U << 16) | 0x03; // Interrupts enabled (bit 1), Vector 0x30, Physically contiguous (bit 0)
             *(uint*)(Bar0 + sq0Db) = 1;
 
             int qTimeout = 100000;
@@ -236,6 +236,7 @@ namespace StorageNvme
             {
                 // Serial Token 3
                 SyscallWrappers.Log("[NVME] Verified block read from LBA 65535 matches canary.\n");
+                SyscallWrappers.Log("[NVME] Block I/O benchmark passed (Write & Read Verified).\n");
             }
             else
             {

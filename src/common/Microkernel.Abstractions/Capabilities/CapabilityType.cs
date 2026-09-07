@@ -7,6 +7,8 @@ namespace Microkernel.Abstractions.Capabilities
         Notification = 2,
         ThreadControl = 3,
         PageFrame = 4,
-        CNode = 5
+        Frame = 4,
+        CNode = 5,
+        VirtualPage = 6
     }
 }

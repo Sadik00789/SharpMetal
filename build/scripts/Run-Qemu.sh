@@ -85,6 +85,18 @@ if [[ "$*" != *"-device virtio-net"* ]]; then
     NET_ARGS+=("-netdev" "user,id=net0" "-device" "virtio-net-pci,netdev=net0")
 fi
 
+HEADLESS_FLAGS=()
+if [[ "$*" == *"--headless"* ]] || [[ "${CI:-}" == "true" ]]; then
+    HEADLESS_FLAGS=("-display" "none" "-vga" "none" "-serial" "stdio" "-no-reboot")
+fi
+
+EXTRA_ARGS=()
+for arg in "$@"; do
+    if [[ "$arg" != "--headless" ]]; then
+        EXTRA_ARGS+=("$arg")
+    fi
+done
+
 # Run QEMU with serial output, debugcon, GDB stub option, and isa-debug-exit
 "${QEMU_BIN}" \
     -machine q35 \
@@ -94,10 +106,8 @@ fi
     "${NVME_ARGS[@]}" \
     "${NET_ARGS[@]}" \
     -m 512M \
-    -no-reboot \
-    -display none \
-    -serial stdio \
+    ${HEADLESS_FLAGS[@]:--display none -serial stdio -no-reboot} \
     -d int,cpu_reset \
     -D "${REPO_ROOT}/qemu.log" \
     -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
-    "$@"
+    "${EXTRA_ARGS[@]}"

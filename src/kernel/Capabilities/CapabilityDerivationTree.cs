@@ -1,0 +1,118 @@
+using System;
+using Kernel.Memory.Heap;
+using Kernel.Memory.Virtual;
+using Microkernel.Abstractions.Capabilities;
+
+namespace Kernel.Capabilities
+{
+    public unsafe struct CdtNode
+    {
+        public CNode* CNode;
+        public uint Slot;
+        public CdtNode* Parent;
+        public CdtNode* FirstChild;
+        public CdtNode* NextSibling;
+        public CdtNode* PrevSibling;
+    }
+
+    public static unsafe class CapabilityDerivationTree
+    {
+        public static CdtNode* CreateNode(CNode* cnode, uint slot)
+        {
+            CdtNode* node = (CdtNode*)SlabAllocator.KmAlloc((ulong)sizeof(CdtNode));
+            if (node == null) return null;
+            node->CNode = cnode;
+            node->Slot = slot;
+            node->Parent = null;
+            node->FirstChild = null;
+            node->NextSibling = null;
+            node->PrevSibling = null;
+            return node;
+        }
+
+        public static void Derive(CdtNode* parent, CdtNode* child)
+        {
+            if (parent == null || child == null) return;
+            child->Parent = parent;
+            child->NextSibling = parent->FirstChild;
+            child->PrevSibling = null;
+            if (parent->FirstChild != null)
+            {
+                parent->FirstChild->PrevSibling = child;
+            }
+            parent->FirstChild = child;
+        }
+
+        public static void Revoke(CdtNode* node)
+        {
+            if (node == null) return;
+
+            CdtNode* currChild = node->FirstChild;
+            while (currChild != null)
+            {
+                CdtNode* next = currChild->NextSibling;
+                Revoke(currChild);
+                Delete(currChild);
+                currChild = next;
+            }
+            node->FirstChild = null;
+        }
+
+        public static void Delete(CdtNode* node)
+        {
+            if (node == null) return;
+
+            // Recurse through derived child nodes first
+            Revoke(node);
+
+            // Unlink from sibling / parent list
+            if (node->PrevSibling != null)
+            {
+                node->PrevSibling->NextSibling = node->NextSibling;
+            }
+            else if (node->Parent != null && node->Parent->FirstChild == node)
+            {
+                node->Parent->FirstChild = node->NextSibling;
+            }
+
+            if (node->NextSibling != null)
+            {
+                node->NextSibling->PrevSibling = node->PrevSibling;
+            }
+
+            // Unmap active page frames bound to this capability
+            if (node->CNode != null && node->Slot < CNode.SlotCount)
+            {
+                Capability* cap = node->CNode->Get(node->Slot);
+                if (cap != null && !cap->IsNull)
+                {
+                    if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                        cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
+                    {
+                        VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
+                        cap->MappedVirtualAddress = 0;
+                        cap->OwnerProcess = null;
+                    }
+                    node->CNode->Revoke(node->Slot);
+                }
+            }
+
+            SlabAllocator.KmFree(node, (ulong)sizeof(CdtNode));
+        }
+
+        public static void RevokeSlot(CNode* cnode, uint slot)
+        {
+            if (cnode == null || slot >= CNode.SlotCount) return;
+            Capability* cap = cnode->Get(slot);
+            if (cap == null || cap->IsNull) return;
+
+            if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
+            {
+                VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
+                cap->MappedVirtualAddress = 0;
+                cap->OwnerProcess = null;
+            }
+        }
+    }
+}

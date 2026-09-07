@@ -18,8 +18,14 @@ namespace Kernel.Capabilities
         [FieldOffset(16)]
         public ulong Badge;
 
+        [FieldOffset(16)]
+        public ulong MappedVirtualAddress;
+
         [FieldOffset(24)]
         public ulong Reserved;
+
+        [FieldOffset(24)]
+        public Scheduling.ProcessControlBlock* OwnerProcess;
 
         public bool IsNull => TargetObject == null || Type == CapabilityType.Null;
     }

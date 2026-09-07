@@ -514,6 +514,14 @@ namespace Kernel.Boot
                 // Slot 12: VirtIO-Net Service Endpoint Capability
                 Endpoint* netEp = Endpoint.Create();
                 rootCNode->Set(12, netEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xCCCC);
+                // Slot 13: NVMe IRQ Notification Capability (Vector 0x30)
+                Notification* nvmeNotif = Notification.Create();
+                InterruptDispatcher.RegisterVector(0x30, nvmeNotif, badge: 0x30);
+                rootCNode->Set(13, nvmeNotif, CapabilityType.Notification, CapabilityRights.All, badge: 0x30);
+                // Slot 14: VirtIO-Net IRQ Notification Capability (Vector 0x31)
+                Notification* netNotif = Notification.Create();
+                InterruptDispatcher.RegisterVector(0x31, netNotif, badge: 0x31);
+                rootCNode->Set(14, netNotif, CapabilityType.Notification, CapabilityRights.All, badge: 0x31);
 
                 EarlySerial.WriteLine("[ROOTTASK] Initial root CNode initialized with 10 core capabilities.");
 
