@@ -43,7 +43,10 @@ namespace Kernel.Diagnostics
 
         private static Concurrency.SpinLockWithIrqSave s_serialLock;
 
-        public static ulong AcquireLock() => s_serialLock.Acquire();
+        public static ulong AcquireLock()
+        {
+            return s_serialLock.Acquire();
+        }
         public static void ReleaseLock(ulong rflags) => s_serialLock.Release(rflags);
 
         public static void WriteCharInternal(char c)

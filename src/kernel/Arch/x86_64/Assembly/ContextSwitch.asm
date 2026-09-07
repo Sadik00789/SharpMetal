@@ -28,15 +28,16 @@ ContextSwitch:
     ; 3. Load new RSP from rdx
     mov rsp, rdx
 
-
-    ; SMP: Stack vacated, release execution guard for other cores
+    ; SMP: Ensure prev->CurrentRsp write is globally visible before releasing the guard.
+    ; mfence must precede the IsExecuting store so any spinning AP sees the saved RSP
+    ; before it wins the CompareExchange and attempts to resume prev.
     test r8, r8
     jz .skip_guard_clear
-    mov dword [r8], 0
-    mfence
+    mfence                  ; store-barrier: flush prev->CurrentRsp to all cores
+    mov dword [r8], 0       ; release execution guard (prev is now safe to schedule elsewhere)
 
 .skip_guard_clear:
-    ; 4. Pop callee-saved registers in reverse order
+    ; 4. Pop callee-saved registers for the NEW thread (from rdx stack)
     pop r15
     pop r14
     pop r13

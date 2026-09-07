@@ -75,6 +75,7 @@ namespace Kernel.Scheduling
             MainThread->Priority = 0;
             MainThread->RemainingTicks = GetPriorityTimeslice(0);
             MainThread->TotalTicks = 0;
+            MainThread->IsExecuting = 1;  // BSP main thread starts executing immediately
             MainThread->KernelStackBase = Cpu.GetRsp() & ~4095UL;
             MainThread->KernelStackTop = Cpu.GetRsp() & ~15UL;
             MainThread->CurrentRsp = Cpu.GetRsp() & ~15UL;
@@ -184,6 +185,11 @@ namespace Kernel.Scheduling
 
         public static ThreadControlBlock* CreateUserThread(ulong entryRip, ulong userRsp, int priority = 0, ulong pml4 = 0)
         {
+            if (entryRip == 0)
+            {
+                EarlySerial.WriteLine("[ERROR] Attempted to create thread with null entry RIP!");
+                return null;
+            }
             if (priority < 0) priority = 0;
             if (priority > 3) priority = 3;
 
@@ -454,7 +460,9 @@ namespace Kernel.Scheduling
             if (next == CurrentThread)
             {
                 next->State = ThreadState.Running;
-        next->IsExecuting = 1;
+                // Set IsExecuting = 1 for this thread. This is essential for idle threads
+                // which start with IsExecuting=0 and never go through the CAS spin below.
+                next->IsExecuting = 1;
                 s_schedLock.Release(rflags);
                 return;
             }
@@ -468,7 +476,8 @@ namespace Kernel.Scheduling
             ThreadControlBlock* prev = CurrentThread;
             CurrentThread = next;
             next->State = ThreadState.Running;
-        next->IsExecuting = 1;
+            // Note: CompareExchange above already atomically set next->IsExecuting = 1.
+            // Do NOT write it again non-atomically here — that would break the memory guard.
 
             // Update TSS.RSP0 to target thread's kernel stack top
             TaskStateSegment.SetRsp0(next->KernelStackTop);
