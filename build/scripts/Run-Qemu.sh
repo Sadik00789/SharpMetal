@@ -72,7 +72,8 @@ fi
 
 NVME_IMG="${REPO_ROOT}/build/nvme.img"
 if [[ ! -f "${NVME_IMG}" ]]; then
-    dd if=/dev/zero of="${NVME_IMG}" bs=1M count=32 status=none
+    dd if=/dev/zero of="${NVME_IMG}" bs=1M count=64 status=none
+    mkfs.fat -F 32 -s 1 "${NVME_IMG}"
 fi
 
 NVME_ARGS=()

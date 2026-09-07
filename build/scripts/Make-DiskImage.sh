@@ -7,6 +7,27 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 export PATH="${HOME}/.dotnet:${HOME}/.local/bin:${PATH}"
 export LD_LIBRARY_PATH="${HOME}/.local/usr/lib64:${LD_LIBRARY_PATH:-}"
 
+# Pre-flight dependency check for required toolchain binaries
+REQUIRED_TOOLS=(dotnet nasm lld-link python3 dd mkfs.fat parted mformat mcopy mmd)
+MISSING_TOOLS=()
+for tool in "${REQUIRED_TOOLS[@]}"; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+        MISSING_TOOLS+=("$tool")
+    fi
+done
+
+if [ ${#MISSING_TOOLS[@]} -gt 0 ]; then
+    echo "[-] Error: Missing required build tool(s): ${MISSING_TOOLS[*]}" >&2
+    echo "[-] Please install them (e.g. sudo apt install nasm lld mtools parted dosfstools python3)." >&2
+    exit 1
+fi
+
+TMP_DIR=$(mktemp -d /tmp/make_disk_XXXXXX)
+cleanup() {
+    rm -rf "$TMP_DIR"
+}
+trap cleanup EXIT
+
 echo "[BUILD] Compiling MiniCoreLib..."
 dotnet build "${REPO_ROOT}/src/common/MiniCoreLib/MiniCoreLib.csproj" -c Release
 
@@ -68,11 +89,23 @@ fi
 
 # 2. If not found, explicitly restore the compiler package into the NuGet cache
 if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    echo "[*] ilc not found in cache. Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..."
-    TMP_RESTORE="/tmp/ilc_restore_$$"
+    ARCH="$(uname -m)"
+    OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+    case "$ARCH" in
+        x86_64) ILC_ARCH="x64" ;;
+        aarch64|arm64) ILC_ARCH="arm64" ;;
+        *) ILC_ARCH="x64" ;;
+    esac
+    ILC_PKG="runtime.${OS}-${ILC_ARCH}.Microsoft.DotNet.ILCompiler"
+
+    echo "[*] ilc not found in cache. Restoring ${ILC_PKG}..."
+    TMP_RESTORE="${TMP_DIR}/ilc_restore"
     mkdir -p "$TMP_RESTORE"
     dotnet new console -o "$TMP_RESTORE" --no-restore >/dev/null 2>&1 || true
-    dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
+    if ! dotnet add "$TMP_RESTORE" package "$ILC_PKG" -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1; then
+        echo "[-] Fallback: Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..." >&2
+        dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
+    fi
     rm -rf "$TMP_RESTORE"
     ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | head -n 1 || true)
 fi
@@ -521,34 +554,36 @@ python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
 
 # Constraint 1: Rootless FAT32 Disk Staging
 NVME_IMG="${REPO_ROOT}/build/nvme.img"
-echo "[DISK] Creating 32MB rootless FAT32 NVMe disk image at ${NVME_IMG}..."
+echo "[DISK] Creating 64MB rootless FAT32 NVMe disk image at ${NVME_IMG}..."
 rm -f "${NVME_IMG}"
-dd if=/dev/zero of="${NVME_IMG}" bs=1M count=32 status=none
+dd if=/dev/zero of="${NVME_IMG}" bs=1M count=64 status=none
 mkfs.fat -F 32 -s 1 "${NVME_IMG}"
-TMP_HELLO="/tmp/HELLO_$$.TXT"
-echo -n "SharpMetal BareMetal OS" > "${TMP_HELLO}"
+TMP_HELLO="${TMP_DIR}/HELLO.TXT"
+printf "SharpMetal BareMetal OS" > "${TMP_HELLO}"
 mcopy -i "${NVME_IMG}" "${TMP_HELLO}" ::/HELLO.TXT
-rm -f "${TMP_HELLO}"
 
-# Build raw GPT disk image if parted and mtools are available
+# Build raw GPT disk image with FAT32 ESP
 DISK_IMG="${REPO_ROOT}/build/disk.img"
-if command -v parted >/dev/null 2>&1 && command -v mformat >/dev/null 2>&1 && command -v mcopy >/dev/null 2>&1; then
-    echo "[DISK] Creating 64MB GPT disk image with FAT32 ESP..."
-    rm -f "${DISK_IMG}"
-    dd if=/dev/zero of="${DISK_IMG}" bs=1M count=64 status=none
-    parted -s "${DISK_IMG}" mklabel gpt
-    parted -s "${DISK_IMG}" mkpart ESP fat32 2048s 131038s
-    parted -s "${DISK_IMG}" set 1 esp on
+echo "[DISK] Creating 64MB GPT disk image with FAT32 ESP..."
+rm -f "${DISK_IMG}"
+dd if=/dev/zero of="${DISK_IMG}" bs=1M count=64 status=none
 
-    # Format partition using mformat with offset
-    PART_START=$((2048 * 512))
-    mformat -i "${DISK_IMG}"@@${PART_START} -F -v "EFI_SYSTEM"
-    mmd -i "${DISK_IMG}"@@${PART_START} ::EFI
-    mmd -i "${DISK_IMG}"@@${PART_START} ::EFI/BOOT
-    mcopy -i "${DISK_IMG}"@@${PART_START} "${REPO_ROOT}/build/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
-    mcopy -i "${DISK_IMG}"@@${PART_START} "${ESP_DIR}/EFI/BOOT/INITRD.IMG" ::EFI/BOOT/INITRD.IMG
-    mcopy -i "${DISK_IMG}"@@${PART_START} "${ESP_DIR}/startup.nsh" ::startup.nsh
-    echo "[DISK] Disk image created successfully at ${DISK_IMG}"
-fi
+PART_START_SECTORS=2048
+PART_END_SECTORS=131038
+PART_SECTORS=$((PART_END_SECTORS - PART_START_SECTORS + 1))
+PART_START_BYTES=$((PART_START_SECTORS * 512))
+
+parted -s "${DISK_IMG}" mklabel gpt
+parted -s "${DISK_IMG}" mkpart ESP fat32 "${PART_START_SECTORS}s" "${PART_END_SECTORS}s"
+parted -s "${DISK_IMG}" set 1 esp on
+
+# Format partition using mformat with exact sector count to protect secondary GPT
+mformat -i "${DISK_IMG}"@@${PART_START_BYTES} -T "${PART_SECTORS}" -F -v "EFI_SYSTEM"
+mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::EFI
+mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::EFI/BOOT
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/build/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/EFI/BOOT/INITRD.IMG" ::EFI/BOOT/INITRD.IMG
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/startup.nsh" ::startup.nsh
+echo "[DISK] Disk image created successfully at ${DISK_IMG}"
 
 echo "[SUCCESS] Make-DiskImage completed successfully."

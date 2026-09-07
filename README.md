@@ -273,7 +273,7 @@ This script automatically:
 4. Assembles assembly thunks (`nasm -f win64`).
 5. Links `BOOTX64.EFI` and server binaries using `lld-link`.
 6. Packages all servers into `INITRD.IMG`.
-7. Creates a 32 MiB raw NVMe storage image (`build/images/nvme.img`).
+7. Creates a 64 MiB raw NVMe storage image (`build/nvme.img`).
 8. Creates a 64 MiB GPT-partitioned disk image (`build/images/disk.img`) with FAT32 EFI System Partition.
 
 ### 2. Run in QEMU
