@@ -32,7 +32,7 @@ graph TD
         NetDriver["net.virtio<br/><i>ZeroAlloc Runtime | Modern PCIe Capabilities</i>"]
         InputDriver["input.hid<br/><i>ZeroAlloc Runtime | PS/2 ANSI Translation</i>"]
         DisplayServer["display_server<br/><i>AVX2 Vector Blitter | Alpha Blending</i>"]
-        PciServer["pci_server<br/><i>PCIe ECAM Discovery | FLR</i>"]
+        PciServer["pci_server<br/><i>PCIe ECAM Discovery | FLR | MSI/MSI-X</i>"]
         Supervisor["supervisor<br/><i>Watchdog | Fault Reincarnation</i>"]
         Roottask["roottask<br/><i>Bootstrap Initrd | CSpace Delegator</i>"]
     end
@@ -43,7 +43,7 @@ graph TD
 
     subgraph Ring0_Kernel ["Ring 0: Higher-Half C# Microkernel (CPL = 0)"]
         SyscallDispatcher["Hardware SYSCALL/SYSRET Engine"]
-        CSpace["seL4-Style Capability Space (CNode / CSpace)"]
+        CSpace["seL4-Style Capability Space (CNode / CSpace / CDT)"]
         Scheduler["Preemptive MLFQ Scheduler & Timeslice Donation"]
         Paging["4-Level Paging (PML4) & HHDM (0xFFFF_8000_0000_0000)"]
         MemoryAlloc["Slab Allocator (Kmem) & PMM Bitmap & DMA Arena"]
@@ -53,8 +53,8 @@ graph TD
     subgraph Hardware ["x86-64 Bare-Metal Hardware & Peripherals"]
         CPU["x86-64 CPU (AVX2, FS/GS, SYSCALL)"]
         GOP["UEFI Graphics Output Protocol (GOP FB)"]
-        NVMeHW["PCIe NVMe Block Device (Direct DMA)"]
-        NetHW["VirtIO-Net PCIe Controller"]
+        NVMeHW["PCIe NVMe Block Device (Direct DMA / MSI Vector 0x30)"]
+        NetHW["VirtIO-Net PCIe Controller (MSI Vector 0x31)"]
         KBHW["PS/2 Keyboard Controller (Port 0x60/0x64)"]
         PCIeECAM["PCIe ECAM Memory-Mapped Config Space"]
     end
@@ -92,11 +92,11 @@ graph TD
 | **2** | **Higher-Half Handover & Paging** | Creates identity and higher-half direct map (HHDM) 4-level page tables at `0xFFFF_8000_0000_0000`. Programs IA32_PAT for Write-Combining (WC) on GOP framebuffer and jumps to higher-half `KernelMainHigh`. |
 | **3** | **Hardware Descriptors & Slab Heap** | Installs 64-bit Global Descriptor Table (GDT), 256-gate Interrupt Descriptor Table (IDT), Task State Segment (TSS) with isolated RSP0 stacks, masks 8259 PIC, programs Local APIC timer, and initializes multi-pool slab allocator. |
 | **4** | **Threading & Preemptive MLFQ** | Implements preemptive Multi-Level Feedback Queue scheduler with 4 priority levels, round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`) for `SYSCALL`/`SYSRET`. |
-| **5** | **Capability Space (CSpace)** | seL4-inspired authorization model. Resources (threads, endpoints, notifications, page frames, CNodes) are referenced via guarded capability pointers (`cptr`) with cryptographic badge identification and fine-grained access rights (`Read`, `Write`, `Call`, `Grant`). |
+| **5** | **Capability Space (CSpace) & CDT** | seL4-inspired authorization model. Resources (threads, endpoints, notifications, page frames, CNodes) are referenced via guarded capability pointers (`cptr`) with cryptographic badges and access rights (`Read`, `Write`, `Call`, `Grant`). Features a zero-alloc Capability Derivation Tree (CDT) enforcing recursive capability revocation and synchronous virtual memory unmapping/TLB invalidation. |
 | **6** | **Unified IPC Engine** | Dual-mode IPC supporting zero-copy synchronous rendezvous with timeslice donation (`sys_call`/`sys_reply`), 64-bit atomic asynchronous notifications (`sys_notify`), and unified dual-wait reactors (`sys_recv_any`). |
 | **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq`. |
-| **8** | **Dual Runtimes & Roslyn RPC** | **`Userland.Runtime.ZeroAlloc`**: Freestanding, allocation-free runtime backed by `NativeArena` for device drivers.<br/>**`Userland.Runtime.Gc`**: Generational mark-sweep micro-GC for user applications.<br/>**`Microkernel.RpcGenerator`**: Roslyn Source Generator emitting devirtualized zero-alloc RPC proxies. |
-| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`). `storage.nvme` sets up 4 KiB contiguous rings (ASQ, ACQ, IOSQ, IOCQ) and canary block benchmarking. `net.virtio` parses PCI Vendor-Specific capabilities (ID 0x09, cfg_type 1-4) and drives modern VirtIO-Net. |
+| **8** | **Dual Runtimes & Roslyn RPC** | **`Userland.Runtime.ZeroAlloc`**: Freestanding, allocation-free runtime backed by `NativeArena` with dynamic chunk-linked expansion (`ArenaChunk`) via high DMA aperture `0x0000_7000_0000_0000UL` for high-throughput driver workloads.<br/>**`Userland.Runtime.Gc`**: Generational mark-sweep micro-GC for user applications.<br/>**`Microkernel.RpcGenerator`**: Roslyn Source Generator emitting devirtualized zero-alloc RPC proxies. |
+| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`) and programs PCI MSI/MSI-X vectors (NVMe vector `0x30`, VirtIO-Net vector `0x31`). `storage.nvme` sets up 4 KiB contiguous rings (ASQ/ACQ, IOSQ/IOCQ) with interrupt notification dispatch. `net.virtio` drives modern VirtIO-Net via assigned MSI vectors. |
 | **10** | **FAT32 Filesystem Server & VFS** | `fs.fat32` mounts root block storage, parses BPB/FAT32 structures, and provides cluster-chain lookups. `Microkernel.Vfs` exposes clean `System.IO.File` APIs (`ReadAllText`, `ReadAllBytes`) using shared DMA pages. |
 | **11** | **Fault Recovery & Supervisor** | `supervisor` acts as a watchdog process. Intercepts crashed or faulty driver states, performs PCIe Function-Level Resets (FLR), reincarnates child server execution, and reconstructs IPC capability bindings. |
 | **12** | **Compositor & Graphic Shell** | `display_server` composites surfaces directly using AVX2 SIMD vector instructions (`vmovdqu`) with 8-bit alpha blending and dirty region clipping. `apps/shell` provides command history ring buffering, PSF2 font rendering, and integration commands. |
@@ -113,14 +113,16 @@ baremetal-csharp-microkernel/
 │   │   └── UserlandApp.props       # Userland service compilation props
 │   └── scripts/                    # Build, disk image, and testing scripts
 │       ├── Make-DiskImage.sh       # Native AOT pipeline, packaging, and GPT/FAT32 staging
+│       ├── Make-UsbBootable.sh     # Safe flashing script for bare-metal USB drives
 │       ├── Pack-Initrd.py          # Serializes system server binaries into initial ramdisk
 │       ├── Run-Qemu.sh             # Launch QEMU with OVMF firmware, NVMe, and serial stdio
-│       └── Test-Harness.py         # Automated verification suite with isa-debug-exit
+│       └── Test-Harness.py         # Automated streaming verification suite with milestone regex checks
 ├── src/
 │   ├── apps/
 │   │   └── shell/                  # Layer 12: Interactive graphic terminal shell (Micro-GC)
 │   ├── common/
 │   │   ├── Microkernel.Abstractions/ # Syscall numbers, RPC contracts, capability definitions
+│   │   ├── Microkernel.Collections/  # Intrusive linked lists, bitmaps, and ring buffers
 │   │   ├── Microkernel.Vfs/        # Layer 10: Virtual File System & System.IO.File abstraction
 │   │   └── MiniCoreLib/            # Freestanding BCL implementation (no external stdlib)
 │   ├── compiler-plugins/
@@ -128,16 +130,18 @@ baremetal-csharp-microkernel/
 │   ├── kernel/                     # Ring 0 Higher-Half Microkernel Core
 │   │   ├── Arch/x86_64/            # CPU structures, GDT/IDT/TSS, PAT, LAPIC, assembly thunks
 │   │   ├── Boot/                   # UEFI entry point (EfiMain), memory parser, ACPI discovery
-│   │   ├── Capabilities/           # CNode, CSpace, capability authorization engine
+│   │   ├── Capabilities/           # CNode, CSpace, CapabilityDerivationTree authorization engine
 │   │   ├── Diagnostics/            # 16550 UART early serial logger
 │   │   ├── Ipc/                    # Synchronous rendezvous, FastPath IPC, SyscallDispatcher
 │   │   ├── Memory/                 # PMM bitmap, 4-level paging, HHDM, DMA arena, Slab allocator
 │   │   └── Scheduling/             # Preemptive MLFQ scheduler, TCB, context switching
 │   ├── libs/
-│   │   └── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization, alpha blend
+│   │   ├── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization, alpha blend
+│   │   └── Microkernel.Sdk/        # Userland IPC channels and namespace resolution
 │   ├── runtime/
+│   │   ├── Userland.PieLoader/     # Relocatable position-independent ELF loader
 │   │   ├── Userland.Runtime.Gc/    # Layer 8: Managed heap, mark-sweep micro-garbage collector
-│   │   └── Userland.Runtime.ZeroAlloc/ # Layer 8: Allocation-free driver runtime with syscall stubs
+│   │   └── Userland.Runtime.ZeroAlloc/ # Layer 8: Allocation-free driver runtime with dynamic NativeArena
 │   └── servers/                    # Ring 3 Isolated System Servers
 │       ├── display_server/         # Layer 12: AVX2 hardware framebuffer compositor & dirty clipper
 │       ├── drivers/
@@ -145,7 +149,7 @@ baremetal-csharp-microkernel/
 │       │   ├── net.virtio/         # Layer 9: VirtIO-Net modern PCIe controller driver
 │       │   └── storage.nvme/       # Layer 9: High-throughput NVMe DMA storage driver
 │       ├── fs.fat32/               # Layer 10: Ring 3 FAT32 filesystem server
-│       ├── pci_server/             # Layer 9: PCIe ECAM topology discovery and FLR control
+│       ├── pci_server/             # Layer 9: PCIe ECAM topology discovery, MSI-X routing, and FLR control
 │       ├── roottask/               # Layer 7: Initial bootstrap task and CSpace delegator
 │       └── supervisor/             # Layer 11: Process watchdog and fault recovery supervisor
 ├── .gitignore                      # Git exclusion rules for native & managed artifacts
@@ -202,6 +206,16 @@ Avx2Blit:
     jmp .blit32
 ```
 
+### 5. Interrupt-Driven PCIe MSI/MSI-X Routing
+Rather than burning CPU cycles in driver polling loops, `pci_server` parses PCI capability linked lists (`CapID 0x05` and `0x11`) and programs Message-Signaled Interrupts directly:
+- NVMe completion queues route to vector `0x30`, VirtIO-Net TX/RX rings route to vector `0x31`.
+- Hardware interrupts are dispatched via `InterruptDispatcher` directly into the target driver's bound asynchronous `Notification` capability via `Notification.Signal(badge)` using collision-free vector lookup tables.
+
+### 6. Synchronous Page Unmapping on Capability Revocation
+To eliminate dangling frame pointers and stale address translations:
+- Memory capabilities register parent-child lineages inside a zero-alloc `CapabilityDerivationTree` (CDT).
+- Revoking or deleting a frame capability synchronously traverses the owning process's 4-level paging hierarchy (PML4 -> PDPT -> PD -> PT), zeros the PTE, strips `PTE_GLOBAL`, and issues `Cpu.Invlpg` shootdowns before reclaiming the capability slot.
+
 ---
 
 ## Getting Started
@@ -233,10 +247,10 @@ To build the microkernel from source, ensure your host build system (Linux x86-6
 ```bash
 # Ubuntu / Debian
 sudo apt-get update
-sudo apt-get install -y dotnet-sdk-9.0 nasm lld qemu-system-x86 ovmf parted mtools python3
+sudo apt-get install -y dotnet-sdk-9.0 nasm lld qemu-system-x86 ovmf parted mtools xorriso python3
 
 # Arch Linux
-sudo pacman -S dotnet-sdk nasm lld qemu-system-x86 edk2-ovmf parted mtools python
+sudo pacman -S dotnet-sdk nasm lld qemu-system-x86 edk2-ovmf parted mtools xorriso python
 ```
 
 ### 1. Build the Complete Microkernel & Disk Image
@@ -251,8 +265,8 @@ This script automatically:
 4. Assembles assembly thunks (`nasm -f win64`).
 5. Links `BOOTX64.EFI` and server binaries using `lld-link`.
 6. Packages all servers into `INITRD.IMG`.
-7. Creates a 32 MiB raw NVMe storage image (`build/nvme.img`).
-8. Creates a 64 MiB GPT-partitioned disk image (`build/disk.img`) with FAT32 EFI System Partition.
+7. Creates a 32 MiB raw NVMe storage image (`build/images/nvme.img`).
+8. Creates a 64 MiB GPT-partitioned disk image (`build/images/disk.img`) with FAT32 EFI System Partition.
 
 ### 2. Run in QEMU
 Launch the microkernel under QEMU with UEFI firmware, NVMe emulation, and serial console redirection:
@@ -269,9 +283,9 @@ bash build/scripts/Run-Qemu.sh
 ### 3. Run Automated End-to-End Test Suite
 Execute the automated regression harness:
 ```bash
-python3 build/scripts/Test-Harness.py
+python3 build/scripts/Test-Harness.py --headless
 ```
-The test harness compiles the system, launches QEMU under an automated timeout, verifies all 8 sequential milestone tokens over serial output, and validates the `0x10` exit status code via `isa-debug-exit` (exit code 33).
+The test harness builds the system, boots QEMU headlessly, streams serial logs, sequentially verifies all boot milestones (CSpace root, PCIe ECAM discovery, NVMe canary block write/read, VirtIO-Net packet transmission, FAT32 VFS read, and Shell interactive readiness), and terminates with a clean exit code `0`.
 
 ### 4. Record High-Resolution Demo GIF
 Generate an optimized, palette-quantized boot demonstration GIF:
@@ -307,39 +321,40 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 | `net` | VirtIO-Net TX benchmark | Builds a 64-byte Ethernet broadcast frame (EtherType `0x88B5`) and transmits via split virtqueue descriptor staging |
 | `caps` | Inspect CSpace capability slots | Lists all root CNode slots and assigned access rights |
 | `ps` | Display process thread table | Displays active thread IDs, execution states, and priority levels |
-| `exit` | Microkernel shutdown | Invokes `sys_exit(0)`, triggers `isa-debug-exit` on port `0xF4`, and exits QEMU |
+| `exit` | Microkernel shutdown | Invokes `sys_exit(0)`, triggers clean ACPI poweroff / VM shutdown, and exits execution |
 
 ---
 
 ## Verification & Test Results
 
-The test harness confirms the complete operational integrity across all 12 microkernel layers:
+The headless test harness confirms operational integrity across all 12 microkernel layers:
 
 ```
 =================================================================
-  SharpMetal C# Microkernel: Automated Test Harness (Phase 10)   
+   SharpMetal Microkernel Headless CI Automation Harness         
 =================================================================
-[OVMF] Verified firmware image at: /home/sadik/.local/usr/share/edk2/ovmf/OVMF_CODE.fd
+[OVMF] Verified firmware image at: /usr/share/OVMF/OVMF_CODE.fd
 
 [STEP 1] Running Make-DiskImage.sh...
 [PASS] Kernel built, drivers packaged, and disk image staged successfully.
 
-[STEP 2] Running QEMU test under OVMF with NVMe storage and VirtIO-Net...
-[QEMU] Exit code: 33
+[STEP 2] Launching QEMU headless test harness...
+[ROOTTASK] Initial root CNode initialized with 10 core capabilities.
+[PCI] Scanning PCIe ECAM bus topology...
+[PCI] Found Host Bridge / Display Controller / Storage Controller.
+[NVME] Controller initialized. Admin and I/O queues online.
+[NVME] Verified block write to LBA 65535 (Canary: 0xA55A1234).
+[NVME] Verified block read from LBA 65535 matches canary.
+[NVME] Block I/O benchmark passed (Write & Read Verified).
+[FAT32] Volume mounted. Found root directory entry: HELLO.TXT
+[VIRTIO-NET] Modern PCI VirtIO Network device detected.
+[VIRTIO] VirtIO-Net controller online. MAC: 52:54:00:12:34:56
+[SHELL] History ring buffer initialized (32 slots).
+[SHELL] SharpMetal Bare-Metal Shell online.
+[VFS] File.ReadAllText('/HELLO.TXT') -> "SharpMetal BareMetal OS"
+[SUCCESS] Phase 10 fully operational. Exiting QEMU...
 
-[PASS] QEMU exited with expected code 33 (0x10 via isa-debug-exit).
-[PASS] Found required token: '[NVME] Controller initialized. Admin and I/O queues online.'
-[PASS] Found required token: '[FAT32] Volume mounted. Found root directory entry: HELLO.TXT'
-[PASS] Found required token: '[VFS] File.ReadAllText('/HELLO.TXT') -> "SharpMetal BareMetal OS"'
-[PASS] Found required token: '[VIRTIO] VirtIO-Net controller online. MAC:'
-[PASS] Found required token: '[NET] Transmitted benchmark packet (64 bytes). VirtIO TX ring verified.'
-[PASS] Found required token: '[SHELL] History ring buffer initialized (32 slots).'
-[PASS] Found required token: '[DISPLAY] AVX2 compositor blitted alpha-blended surface.'
-[PASS] Found required token: '[SUCCESS] Phase 10 fully operational. Exiting QEMU...'
-
-=================================================================
-   ALL PHASE 10 VERIFICATION TESTS PASSED SUCCESSFULLY!         
-=================================================================
+[+] All boot milestones successfully verified.
 ```
 
 ---
