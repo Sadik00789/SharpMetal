@@ -278,7 +278,9 @@ namespace Kernel.Boot
                 Gdt.Initialize(tssBase);
                 fixed (GdtPointer* ptr = &Gdt.Pointer)
                 {
-                    Cpu.LoadGdt(ptr);
+                    ulong ptrAddr = (ulong)ptr;
+                    if (ptrAddr < Hhdm.Base) ptrAddr += Hhdm.Base;
+                    Cpu.LoadGdt((GdtPointer*)ptrAddr);
                 }
 
                 EarlySerial.WriteLine("[STEP 2] Reloading Segments (CS=0x08, DS=0x10)...");
@@ -291,7 +293,9 @@ namespace Kernel.Boot
                 Idt.Initialize(Cpu.GetIsrThunkTable());
                 fixed (IdtPointer* ptr = &Idt.Pointer)
                 {
-                    Cpu.LoadIdt(ptr);
+                    ulong ptrAddr = (ulong)ptr;
+                    if (ptrAddr < Hhdm.Base) ptrAddr += Hhdm.Base;
+                    Cpu.LoadIdt((IdtPointer*)ptrAddr);
                 }
 
                 EarlySerial.WriteLine("[STEP 5] Initializing Slab Allocator...");

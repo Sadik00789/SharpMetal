@@ -105,6 +105,26 @@ namespace Kernel.Diagnostics
             }
         }
 
+        public static unsafe void WriteBytes(byte* msg)
+        {
+            if (!s_isSupported || msg == null) return;
+            ulong rflags = s_serialLock.Acquire();
+            try
+            {
+                int limit = 2048;
+                while (*msg != 0 && limit-- > 0)
+                {
+                    char c = (char)(*msg++);
+                    if (c == '\n') WriteCharInternal('\r');
+                    WriteCharInternal(c);
+                }
+            }
+            finally
+            {
+                s_serialLock.Release(rflags);
+            }
+        }
+
         public static void WriteLine(string s)
         {
             if (!s_isSupported) return;

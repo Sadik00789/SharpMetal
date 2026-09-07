@@ -55,10 +55,6 @@ namespace Kernel.Arch.x86_64.Descriptors
                 perCpu->Tss.Rsp0 = alignedRsp0;
                 perCpu->KernelRsp = alignedRsp0;
             }
-            if (Instance != null)
-            {
-                Instance->Rsp0 = alignedRsp0;
-            }
             Hardware.Cpu.SetSyscallKernelRsp(alignedRsp0);
         }
     }

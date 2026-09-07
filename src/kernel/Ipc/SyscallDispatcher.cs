@@ -42,11 +42,7 @@ namespace Kernel.Ipc
                 case SyscallNumbers.SysLog: // 0x03
                     if (a1 != 0)
                     {
-                        byte* msg = (byte*)a1;
-                        while (*msg != 0)
-                        {
-                            EarlySerial.WriteChar((char)(*msg++));
-                        }
+                        EarlySerial.WriteBytes((byte*)a1);
                     }
                     return 0;
 

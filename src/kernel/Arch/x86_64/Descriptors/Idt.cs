@@ -59,7 +59,12 @@ namespace Kernel.Arch.x86_64.Descriptors
                 }
 
                 Pointer.Limit = (ushort)((256 * sizeof(IdtEntry)) - 1); // 4095 bytes
-                Pointer.Base = (ulong)entries;
+                ulong baseAddr = (ulong)entries;
+                if (baseAddr < Memory.Virtual.Hhdm.Base)
+                {
+                    baseAddr += Memory.Virtual.Hhdm.Base;
+                }
+                Pointer.Base = baseAddr;
             }
         }
     }

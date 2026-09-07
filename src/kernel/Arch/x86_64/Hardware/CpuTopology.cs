@@ -135,6 +135,12 @@ namespace Kernel.Arch.x86_64.Hardware
             }
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static ulong ToHigherHalf(ulong addr)
+        {
+            return addr < Memory.Virtual.Hhdm.Base ? (addr + Memory.Virtual.Hhdm.Base) : addr;
+        }
+
         public static void InitializeBsp(byte bspApicId)
         {
             BootedCores = 1;
@@ -158,22 +164,22 @@ namespace Kernel.Arch.x86_64.Hardware
             fixed (PerCpuData* p15 = &s_perCpuStorage15)
             fixed (ulong* ptrs = s_storage.PerCpuPointers)
             {
-                ptrs[0] = (ulong)p0;
-                ptrs[1] = (ulong)p1;
-                ptrs[2] = (ulong)p2;
-                ptrs[3] = (ulong)p3;
-                ptrs[4] = (ulong)p4;
-                ptrs[5] = (ulong)p5;
-                ptrs[6] = (ulong)p6;
-                ptrs[7] = (ulong)p7;
-                ptrs[8] = (ulong)p8;
-                ptrs[9] = (ulong)p9;
-                ptrs[10] = (ulong)p10;
-                ptrs[11] = (ulong)p11;
-                ptrs[12] = (ulong)p12;
-                ptrs[13] = (ulong)p13;
-                ptrs[14] = (ulong)p14;
-                ptrs[15] = (ulong)p15;
+                ptrs[0] = ToHigherHalf((ulong)p0);
+                ptrs[1] = ToHigherHalf((ulong)p1);
+                ptrs[2] = ToHigherHalf((ulong)p2);
+                ptrs[3] = ToHigherHalf((ulong)p3);
+                ptrs[4] = ToHigherHalf((ulong)p4);
+                ptrs[5] = ToHigherHalf((ulong)p5);
+                ptrs[6] = ToHigherHalf((ulong)p6);
+                ptrs[7] = ToHigherHalf((ulong)p7);
+                ptrs[8] = ToHigherHalf((ulong)p8);
+                ptrs[9] = ToHigherHalf((ulong)p9);
+                ptrs[10] = ToHigherHalf((ulong)p10);
+                ptrs[11] = ToHigherHalf((ulong)p11);
+                ptrs[12] = ToHigherHalf((ulong)p12);
+                ptrs[13] = ToHigherHalf((ulong)p13);
+                ptrs[14] = ToHigherHalf((ulong)p14);
+                ptrs[15] = ToHigherHalf((ulong)p15);
 
                 for (int i = 0; i < MaxCpus; i++)
                 {
@@ -186,11 +192,30 @@ namespace Kernel.Arch.x86_64.Hardware
                 }
 
                 // Setup BSP (Core 0)
-                p0->CoreIndex = 0;
-                p0->ApicId = bspApicId;
+                PerCpuData* bspPerCpu = (PerCpuData*)ptrs[0];
+                bspPerCpu->CoreIndex = 0;
+                bspPerCpu->ApicId = bspApicId;
 
-                // Configure BSP IA32_GS_BASE (MSR 0xC0000101)
-                Cpu.WriteMsr(0xC0000101, (ulong)p0);
+                // Initialize BSP private TSS and GDT (matching AP configuration)
+                ulong intStackPhys = Memory.Physical.PageFrameAllocator.AllocateContiguousFrames(4);
+                ulong intStackTop = (Memory.Virtual.Hhdm.PhysicalToVirtual(intStackPhys) + 16384) & ~15UL;
+                bspPerCpu->Tss.Initialize(intStackTop);
+                bspPerCpu->KernelRsp = intStackTop;
+                bspPerCpu->UserRspScratch = 0;
+
+                ulong tssVirt = (ulong)&bspPerCpu->Tss;
+                if (tssVirt < Memory.Virtual.Hhdm.Base) tssVirt += Memory.Virtual.Hhdm.Base;
+                Descriptors.Gdt.InitializeCore(0, tssVirt);
+                Descriptors.GdtPointer* gdtPtr = Descriptors.Gdt.GetPointer(0);
+                if (gdtPtr != null)
+                {
+                    Cpu.LoadGdt(gdtPtr);
+                }
+                Cpu.ReloadSegments(0x08, 0x10);
+                Cpu.LoadTss(0x28);
+
+                // Configure BSP IA32_GS_BASE (MSR 0xC0000101) to higher-half address AFTER ReloadSegments
+                Cpu.WriteMsr(0xC0000101, (ulong)bspPerCpu);
             }
         }
 

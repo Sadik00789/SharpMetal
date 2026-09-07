@@ -22,7 +22,7 @@ ReloadSegments:
     mov es, dx
     mov ss, dx
     mov fs, dx
-    mov gs, dx
+    ; Do not write to gs: writing to gs resets IA32_GS_BASE to 0!
 
     push rcx                  ; Push 64-bit code selector (0x08)
     lea rax, [rel .reload_cs] ; Push return address

@@ -188,6 +188,7 @@ namespace Kernel.Arch.x86_64.Hardware
 
             // 2. Initialize and load core's private GDT & TSS
             ulong tssVirt = (ulong)&perCpu->Tss;
+            if (tssVirt < Hhdm.Base) tssVirt += Hhdm.Base;
             Gdt.InitializeCore(coreIndex, tssVirt);
             GdtPointer* gdtPtr = Gdt.GetPointer(coreIndex);
             if (gdtPtr != null)
@@ -203,7 +204,9 @@ namespace Kernel.Arch.x86_64.Hardware
             // 4. Load shared kernel IDT
             fixed (IdtPointer* ptr = &Idt.Pointer)
             {
-                Cpu.LoadIdt(ptr);
+                ulong ptrAddr = (ulong)ptr;
+                if (ptrAddr < Hhdm.Base) ptrAddr += Hhdm.Base;
+                Cpu.LoadIdt((IdtPointer*)ptrAddr);
             }
 
             // 5. Enable AVX

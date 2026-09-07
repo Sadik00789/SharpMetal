@@ -43,7 +43,9 @@ namespace Kernel.Arch.x86_64.Descriptors
             if (coreIndex < 0 || coreIndex >= 16) return null;
             fixed (byte* p = s_storage.RawTables)
             {
-                return (GdtTable*)(p + (coreIndex * 56));
+                ulong addr = (ulong)(p + (coreIndex * 56));
+                if (addr < Memory.Virtual.Hhdm.Base) addr += Memory.Virtual.Hhdm.Base;
+                return (GdtTable*)addr;
             }
         }
 
@@ -53,22 +55,30 @@ namespace Kernel.Arch.x86_64.Descriptors
             if (coreIndex < 0 || coreIndex >= 16) return null;
             fixed (byte* p = s_storage.RawPointers)
             {
-                return (GdtPointer*)(p + (coreIndex * 16));
+                ulong addr = (ulong)(p + (coreIndex * 16));
+                if (addr < Memory.Virtual.Hhdm.Base) addr += Memory.Virtual.Hhdm.Base;
+                return (GdtPointer*)addr;
             }
         }
 
         public static void Initialize(ulong tssBase)
         {
+            if (tssBase < Memory.Virtual.Hhdm.Base) tssBase += Memory.Virtual.Hhdm.Base;
             InitializeCore(0, tssBase);
             GdtTable* t0 = GetTable(0);
             GdtPointer* p0 = GetPointer(0);
             if (t0 != null) Table = *t0;
-            if (p0 != null) Pointer = *p0;
+            if (p0 != null)
+            {
+                Pointer = *p0;
+                if (Pointer.Base < Memory.Virtual.Hhdm.Base) Pointer.Base += Memory.Virtual.Hhdm.Base;
+            }
         }
 
         public static void InitializeCore(int coreIndex, ulong tssBase)
         {
             if (coreIndex < 0 || coreIndex >= 16) return;
+            if (tssBase < Memory.Virtual.Hhdm.Base) tssBase += Memory.Virtual.Hhdm.Base;
 
             GdtTable* pTable = GetTable(coreIndex);
             GdtPointer* pPointer = GetPointer(coreIndex);
@@ -99,7 +109,9 @@ namespace Kernel.Arch.x86_64.Descriptors
             gdt[6] = (tssBaseVal >> 32) & 0xFFFFFFFF;    // Base in lower 32 bits, upper 32 bits MUST be 0
 
             pPointer->Limit = 55;
-            pPointer->Base = (ulong)gdt;
+            ulong gdtAddr = (ulong)gdt;
+            if (gdtAddr < Memory.Virtual.Hhdm.Base) gdtAddr += Memory.Virtual.Hhdm.Base;
+            pPointer->Base = gdtAddr;
         }
     }
 }
