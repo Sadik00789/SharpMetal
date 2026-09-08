@@ -49,7 +49,8 @@ namespace Kernel.Scheduling
         public volatile int IsExecuting;        // SMP concurrent execution guard (1 = executing, 0 = idle)
 
         // Padding to align FpuState to a 64-byte boundary at offset 256 (0x100)
-        private fixed byte _padTo256[44];
+        // Offset 240 (IsExecuting) + 4 bytes (int) + 12 bytes pad = offset 256
+        private fixed byte _padTo256[12];
 
         // Extended 832-byte buffer for x87, SSE, and AVX YMM register state (XSAVE/XRSTOR)
         public fixed byte FpuState[832];

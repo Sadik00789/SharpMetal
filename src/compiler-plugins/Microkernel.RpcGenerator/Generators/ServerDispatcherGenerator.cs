@@ -96,7 +96,7 @@ namespace Microkernel.RpcGenerator.Generators
             sb.AppendLine();
             sb.AppendLine(indent + "    public static int DispatchFunctionPointer(delegate* unmanaged[Cdecl]<ulong, ulong, ulong, ulong, ulong, ulong> targetFnPtr, uint endpointCptr)");
             sb.AppendLine(indent + "    {");
-            sb.AppendLine(indent + "        if (targetFnPtr == null || (ulong)targetFnPtr < 0x0000000000400000UL)");
+            sb.AppendLine(indent + "        if (targetFnPtr == null || (ulong)targetFnPtr < 0x0000000000400000UL || (ulong)targetFnPtr >= 0x0000800000000000UL)");
             sb.AppendLine(indent + "        {");
             sb.AppendLine(indent + "            return -1; // IPC_ERR_INVALID_DISPATCH_TARGET");
             sb.AppendLine(indent + "        }");

@@ -150,9 +150,11 @@ namespace Kernel.Scheduling
             tcb->Next = null;
 
             // Initialize clean FPU/SSE/AVX state
-            *(ushort*)&tcb->FpuState[0] = 0x037F;
-            *(uint*)&tcb->FpuState[24] = 0x1F80;
-            *(ulong*)&tcb->FpuState[512] = 7;
+            byte* pFpu = tcb->FpuState;
+            for (int i = 0; i < 832; i++) pFpu[i] = 0;
+            *(ushort*)&pFpu[0] = 0x037F;
+            *(uint*)&pFpu[24] = 0x1F80;
+            *(ulong*)&pFpu[512] = 0UL;
 
             tcb->IpcWaitNext = null;
             tcb->ReplyTarget = null;
@@ -216,9 +218,11 @@ namespace Kernel.Scheduling
             tcb->Next = null;
 
             // Initialize clean FPU/SSE/AVX state
-            *(ushort*)&tcb->FpuState[0] = 0x037F;
-            *(uint*)&tcb->FpuState[24] = 0x1F80;
-            *(ulong*)&tcb->FpuState[512] = 7;
+            byte* pFpu = tcb->FpuState;
+            for (int i = 0; i < 832; i++) pFpu[i] = 0;
+            *(ushort*)&pFpu[0] = 0x037F;
+            *(uint*)&pFpu[24] = 0x1F80;
+            *(ulong*)&pFpu[512] = 0UL;
 
             ThreadControlBlock* current = CurrentThread;
             tcb->CSpaceRoot = (current != null && current->CSpaceRoot != null) ? current->CSpaceRoot : (MainThread != null ? MainThread->CSpaceRoot : null);
@@ -380,6 +384,8 @@ namespace Kernel.Scheduling
 
             s_schedLock.Release(CurrentThread->Rflags);
         }
+
+        public static void YieldCurrentThread() => Yield();
 
         public static void Yield()
         {

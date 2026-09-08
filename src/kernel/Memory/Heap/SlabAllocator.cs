@@ -18,6 +18,9 @@ namespace Kernel.Memory.Heap
 
         public static void Initialize()
         {
+            // Size classes are powers of 2. For classes >= 64, carving 4096-byte frames
+            // guarantees that all blocks are at least 64-byte aligned (s_cache2048 for ThreadControlBlock
+            // provides 2048-byte alignment, satisfying XSAVE/XRSTOR 64-byte alignment requirements).
             s_cache32.Initialize(32);
             s_cache64.Initialize(64);
             s_cache128.Initialize(128);

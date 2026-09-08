@@ -42,48 +42,20 @@ namespace Kernel.Diagnostics
         }
 
         private static Concurrency.SpinLockWithIrqSave s_serialLock;
-        private static volatile int s_lockOwner = -1;
-        private static int s_recursionDepth = 0;
 
         public static ulong AcquireLock()
         {
-            ulong rflags = Cpu.ReadRflags();
-            Cpu.DisableInterrupts();
-
-            int coreId = LocalApic.IsInitialized ? CpuTopology.GetCurrentCoreIndex() : 0;
-            if (s_lockOwner == coreId)
-            {
-                s_recursionDepth++;
-                return rflags;
-            }
-
-            s_serialLock.Lock.Acquire();
-            s_lockOwner = coreId;
-            s_recursionDepth = 1;
-            return rflags;
+            return s_serialLock.Acquire();
         }
 
         public static void ReleaseLock(ulong rflags)
         {
-            int coreId = LocalApic.IsInitialized ? CpuTopology.GetCurrentCoreIndex() : 0;
-            if (s_lockOwner == coreId)
-            {
-                s_recursionDepth--;
-                if (s_recursionDepth == 0)
-                {
-                    s_lockOwner = -1;
-                    s_serialLock.Lock.Release();
-                }
-            }
-
-            Cpu.RestoreRflags(rflags);
+            s_serialLock.Release(rflags);
         }
 
         public static void ForceResetLock()
         {
             s_serialLock.Lock.Serving = s_serialLock.Lock.NextTicket;
-            s_lockOwner = -1;
-            s_recursionDepth = 0;
         }
 
         public static void WriteCharInternal(char c)

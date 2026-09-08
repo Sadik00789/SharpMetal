@@ -1,3 +1,4 @@
+bits 64
 default rel
 section .text
 
@@ -15,10 +16,13 @@ extern ThreadEntryPointRunner
 ; -----------------------------------------------------------------------------
 FpuStateOffset equ 256
 CurrentRspOffset equ 24
-IsExecutingOffset equ 212
+IsExecutingOffset equ 240
 
 ContextSwitch:
-    ; 1. Push callee-saved registers (Microsoft x64 ABI)
+    test rcx, rcx
+    jz .restore_next
+
+    ; 1. Preserve Win64 callee-saved registers on outgoing stack
     push rbx
     push rbp
     push rdi
@@ -28,36 +32,39 @@ ContextSwitch:
     push r14
     push r15
 
-    ; 2. Preserve incoming arguments in scratch registers r8 and r9 prior to clearing edx
-    mov r8, rcx             ; r8 = prev
-    mov r9, rdx             ; r9 = next
-    mov rdi, r8             ; rdi = prev
-    mov rsi, r9             ; rsi = next
+    ; 2. Preserve incoming arguments in scratch registers
+    mov r8, rdx             ; r8 = next
+    mov r9, rcx             ; r9 = prev
 
-    ; 3. Save AVX/YMM/FPU state if prev != null
-    test rdi, rdi
-    jz .skip_fpu_save
-    mov eax, 7              ; component mask: x87 (1) | SSE (2) | AVX (4)
-    xor edx, edx            ; clear edx (r8/r9 preserved!)
-    xsave64 [rdi + FpuStateOffset]
+    ; 3. Save FPU/SSE/AVX state into prev->FpuState (offset 256)
+    mov eax, 7              ; XFEATURE_MASK_X87 | XFEATURE_MASK_SSE | XFEATURE_MASK_AVX
+    xor edx, edx
+    xsave64 [r9 + FpuStateOffset]
 
-    ; Save current RSP to prev->CurrentRsp
-    mov [rdi + CurrentRspOffset], rsp
+    ; 4. Save outgoing RSP
+    mov [r9 + CurrentRspOffset], rsp
 
-    ; SMP: Flush prev->CurrentRsp and release execution guard
+    ; 5. Switch to incoming thread stack
+    mov rsp, [r8 + CurrentRspOffset]
+
+    ; 6. Mark outgoing thread as no longer executing on new stack
+    mov dword [r9 + IsExecutingOffset], 0
     mfence
-    mov dword [rdi + IsExecutingOffset], 0
 
-.skip_fpu_save:
-    ; 4. Load new RSP from next->CurrentRsp
-    mov rsp, [rsi + CurrentRspOffset]
+    mov rdx, r8
+    jmp .do_restore
 
-    ; 5. Restore AVX/YMM/FPU state for next thread
-    mov eax, 7              ; component mask: x87 (1) | SSE (2) | AVX (4)
-    xor edx, edx            ; clear edx
-    xrstor64 [rsi + FpuStateOffset]
+.restore_next:
+    mov rsp, [rdx + CurrentRspOffset]
 
-    ; 6. Pop callee-saved registers for the NEW thread
+.do_restore:
+    ; 7. Restore FPU/SSE/AVX state from next->FpuState (offset 256)
+    mov r8, rdx
+    mov eax, 7
+    xor edx, edx
+    xrstor64 [r8 + FpuStateOffset]
+
+    ; 8. Restore callee-saved registers
     pop r15
     pop r14
     pop r13
@@ -66,8 +73,6 @@ ContextSwitch:
     pop rdi
     pop rbp
     pop rbx
-
-    ; 7. Resume execution at the target thread's return address
     ret
 
 ; -----------------------------------------------------------------------------
