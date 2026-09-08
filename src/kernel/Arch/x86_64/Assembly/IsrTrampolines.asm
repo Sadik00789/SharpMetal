@@ -35,9 +35,20 @@ isr_common_stub:
     push rax
 
     mov rcx, rsp       ; 1st parameter: InterruptContext*
-    sub rsp, 32        ; Allocate 32-byte shadow space (keeps 16-byte alignment)
+
+    ; Ensure 16-byte stack alignment prior to calling C# DispatchInterrupt (prevents #GP on SIMD)
+    test rsp, 8
+    jz .aligned
+    sub rsp, 8         ; Align stack to 16 bytes
+    sub rsp, 32        ; Allocate 32-byte shadow space
+    call DispatchInterrupt
+    add rsp, 40        ; Restore shadow space (32) + alignment adjustment (8)
+    jmp .done_dispatch
+.aligned:
+    sub rsp, 32        ; Allocate 32-byte shadow space
     call DispatchInterrupt
     add rsp, 32        ; Restore shadow space
+.done_dispatch:
 
     ; Restore 15 GPRs in reverse order
     pop rax

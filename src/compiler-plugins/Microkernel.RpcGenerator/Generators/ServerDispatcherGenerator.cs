@@ -93,6 +93,20 @@ namespace Microkernel.RpcGenerator.Generators
             sb.AppendLine(indent + "            DispatchOnce(ref service, endpointCptr);");
             sb.AppendLine(indent + "        }");
             sb.AppendLine(indent + "    }");
+            sb.AppendLine();
+            sb.AppendLine(indent + "    public static int DispatchFunctionPointer(delegate* unmanaged[Cdecl]<ulong, ulong, ulong, ulong, ulong, ulong> targetFnPtr, uint endpointCptr)");
+            sb.AppendLine(indent + "    {");
+            sb.AppendLine(indent + "        if (targetFnPtr == null || (ulong)targetFnPtr < 0x0000000000400000UL)");
+            sb.AppendLine(indent + "        {");
+            sb.AppendLine(indent + "            return -1; // IPC_ERR_INVALID_DISPATCH_TARGET");
+            sb.AppendLine(indent + "        }");
+            sb.AppendLine(indent + "        ulong msgInfo, d0, d1, d2, d3;");
+            sb.AppendLine(indent + "        ulong status = SyscallWrappers.Recv(endpointCptr, out msgInfo, out d0, out d1, out d2, out d3);");
+            sb.AppendLine(indent + "        if (status != 0) return (int)status;");
+            sb.AppendLine(indent + "        ulong result = targetFnPtr(msgInfo, d0, d1, d2, d3);");
+            sb.AppendLine(indent + "        SyscallWrappers.Reply(result, 0, 0, 0);");
+            sb.AppendLine(indent + "        return 0;");
+            sb.AppendLine(indent + "    }");
             sb.AppendLine("}");
 
             if (!string.IsNullOrEmpty(ns))

@@ -56,10 +56,7 @@ namespace DisplayServer.Compositor
                 {
                     totalPixels = pitchPixels;
                 }
-                for (ulong i = 0; i < totalPixels; i++)
-                {
-                    fb[i] = color;
-                }
+                Avx2Fill(fb, color, totalPixels);
             }
 
             SyscallWrappers.Log("[DISPLAY] AVX2 software compositor initialized. Framebuffer cleared.\n");
@@ -74,7 +71,19 @@ namespace DisplayServer.Compositor
                 {
                     uint* dstRow = fb + (row * Pitch) + x;
                     uint* srcRow = src + (row * srcWidth) + x;
-                    for (uint col = 0; col < w && (col + x) < srcWidth; col++)
+
+                    uint maxCols = (srcWidth > x) ? (srcWidth - x) : 0;
+                    uint colsToCopy = (w < maxCols) ? w : maxCols;
+
+                    uint vectorPixels = colsToCopy & ~7u;
+                    uint tailPixels = colsToCopy & 7u;
+
+                    if (vectorPixels > 0)
+                    {
+                        Avx2Blit(dstRow, srcRow, (ulong)vectorPixels * 4UL);
+                    }
+
+                    for (uint col = vectorPixels; col < vectorPixels + tailPixels; col++)
                     {
                         dstRow[col] = srcRow[col];
                     }

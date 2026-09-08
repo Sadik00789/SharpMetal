@@ -8,44 +8,66 @@ global GetThreadStartTrampoline
 extern ThreadEntryPointRunner
 
 ; -----------------------------------------------------------------------------
-; Cooperative Context Switch
-; void ContextSwitch(ulong* oldRspOut, ulong newRsp)
-; rcx = oldRspOut (pointer to location where current RSP is saved)
-; rdx = newRsp    (new stack pointer to restore)
+; Cooperative Context Switch with Extended AVX/FPU State Preservation
+; void ContextSwitch(ThreadControlBlock* prev, ThreadControlBlock* next)
+; rcx = prev (pointer to outgoing ThreadControlBlock)
+; rdx = next (pointer to incoming ThreadControlBlock)
 ; -----------------------------------------------------------------------------
+FpuStateOffset equ 256
+CurrentRspOffset equ 24
+IsExecutingOffset equ 212
+
 ContextSwitch:
-    ; 1. Push callee-saved registers
+    ; 1. Push callee-saved registers (Microsoft x64 ABI)
     push rbx
     push rbp
+    push rdi
+    push rsi
     push r12
     push r13
     push r14
     push r15
 
-    ; 2. Save current RSP to [rcx]
-    mov [rcx], rsp
+    ; 2. Preserve incoming arguments in scratch registers r8 and r9 prior to clearing edx
+    mov r8, rcx             ; r8 = prev
+    mov r9, rdx             ; r9 = next
+    mov rdi, r8             ; rdi = prev
+    mov rsi, r9             ; rsi = next
 
-    ; 3. Load new RSP from rdx
-    mov rsp, rdx
+    ; 3. Save AVX/YMM/FPU state if prev != null
+    test rdi, rdi
+    jz .skip_fpu_save
+    mov eax, 7              ; component mask: x87 (1) | SSE (2) | AVX (4)
+    xor edx, edx            ; clear edx (r8/r9 preserved!)
+    xsave64 [rdi + FpuStateOffset]
 
-    ; SMP: Ensure prev->CurrentRsp write is globally visible before releasing the guard.
-    ; mfence must precede the IsExecuting store so any spinning AP sees the saved RSP
-    ; before it wins the CompareExchange and attempts to resume prev.
-    test r8, r8
-    jz .skip_guard_clear
-    mfence                  ; store-barrier: flush prev->CurrentRsp to all cores
-    mov dword [r8], 0       ; release execution guard (prev is now safe to schedule elsewhere)
+    ; Save current RSP to prev->CurrentRsp
+    mov [rdi + CurrentRspOffset], rsp
 
-.skip_guard_clear:
-    ; 4. Pop callee-saved registers for the NEW thread (from rdx stack)
+    ; SMP: Flush prev->CurrentRsp and release execution guard
+    mfence
+    mov dword [rdi + IsExecutingOffset], 0
+
+.skip_fpu_save:
+    ; 4. Load new RSP from next->CurrentRsp
+    mov rsp, [rsi + CurrentRspOffset]
+
+    ; 5. Restore AVX/YMM/FPU state for next thread
+    mov eax, 7              ; component mask: x87 (1) | SSE (2) | AVX (4)
+    xor edx, edx            ; clear edx
+    xrstor64 [rsi + FpuStateOffset]
+
+    ; 6. Pop callee-saved registers for the NEW thread
     pop r15
     pop r14
     pop r13
     pop r12
+    pop rsi
+    pop rdi
     pop rbp
     pop rbx
 
-    ; 5. Resume execution at the target thread's return address
+    ; 7. Resume execution at the target thread's return address
     ret
 
 ; -----------------------------------------------------------------------------

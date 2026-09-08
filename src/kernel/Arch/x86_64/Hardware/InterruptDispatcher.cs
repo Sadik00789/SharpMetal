@@ -218,6 +218,7 @@ namespace Kernel.Arch.x86_64.Hardware
                 }
             }
 
+            EarlySerial.ForceResetLock();
             ulong serRflags = EarlySerial.AcquireLock();
 
             EarlySerial.WriteInternal("[FAULT] Kernel Panic Vector: ");

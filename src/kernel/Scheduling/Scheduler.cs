@@ -25,6 +25,7 @@ namespace Kernel.Scheduling
         }
 
         private static SpinLockWithIrqSave s_schedLock;
+        private static ThreadControlBlock* s_zombieList = null;
 
         public static ThreadControlBlock* CurrentThread
         {
@@ -69,7 +70,7 @@ namespace Kernel.Scheduling
             s_kernelPml4Phys = VirtualMemorySpace.Pml4PhysicalAddress != 0 ? VirtualMemorySpace.Pml4PhysicalAddress : Cpu.ReadCr3();
 
             // 1. Create Main kernel thread (TID 0) representing current execution context
-            MainThread = (ThreadControlBlock*)SlabAllocator.KmAlloc(256);
+            MainThread = (ThreadControlBlock*)SlabAllocator.KmAlloc((ulong)sizeof(ThreadControlBlock));
             MainThread->Id = NextThreadId++;
             MainThread->State = ThreadState.Running;
             MainThread->Priority = 0;
@@ -81,6 +82,11 @@ namespace Kernel.Scheduling
             MainThread->CurrentRsp = Cpu.GetRsp() & ~15UL;
             MainThread->EntryPoint = null;
             MainThread->Next = null;
+
+            // Initialize clean FPU/SSE/AVX state
+            *(ushort*)&MainThread->FpuState[0] = 0x037F; // FCW
+            *(uint*)&MainThread->FpuState[24] = 0x1F80;  // MXCSR
+            *(ulong*)&MainThread->FpuState[512] = 7;     // XSTATE_BV (x87 | SSE | AVX)
 
             MainThread->CSpaceRoot = null;
             MainThread->CSpaceRootAddress = 0;
@@ -130,19 +136,23 @@ namespace Kernel.Scheduling
             if (priority < 0) priority = 0;
             if (priority > 3) priority = 3;
 
-            ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc(256);
+            ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc((ulong)sizeof(ThreadControlBlock));
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
             tcb->IsExecuting = 0;
             tcb->RemainingTicks = GetPriorityTimeslice(priority);
-            tcb->IsExecuting = 0;
             tcb->TotalTicks = 0;
             tcb->EntryPoint = entryPoint;
             tcb->CSpaceRoot = MainThread != null ? MainThread->CSpaceRoot : null;
             tcb->CSpaceRootAddress = (ulong)tcb->CSpaceRoot;
             tcb->Pml4Address = Cpu.ReadCr3();
             tcb->Next = null;
+
+            // Initialize clean FPU/SSE/AVX state
+            *(ushort*)&tcb->FpuState[0] = 0x037F;
+            *(uint*)&tcb->FpuState[24] = 0x1F80;
+            *(ulong*)&tcb->FpuState[512] = 7;
 
             tcb->IpcWaitNext = null;
             tcb->ReplyTarget = null;
@@ -157,21 +167,23 @@ namespace Kernel.Scheduling
             tcb->KernelStackBase = virtStack;
             tcb->KernelStackTop = (virtStack + 16384) & ~15UL;
 
-            // Synthesize initial call frame:
+            // Synthesize initial call frame (8 callee-saved registers + trampoline):
             ulong stackTop = (virtStack + 16384) & ~15UL;
-            ulong* sp = (ulong*)(stackTop - 56);
+            ulong* sp = (ulong*)(stackTop - 72);
             sp[0] = 0; // r15
             sp[1] = 0; // r14
             sp[2] = 0; // r13
             sp[3] = 0; // r12
-            sp[4] = 0; // rbp
-            sp[5] = 0; // rbx
+            sp[4] = 0; // rsi
+            sp[5] = 0; // rdi
+            sp[6] = 0; // rbp
+            sp[7] = 0; // rbx
             ulong trampoline = Cpu.GetThreadStartTrampoline();
             if (trampoline < Hhdm.Base)
             {
                 trampoline += Hhdm.Base;
             }
-            sp[6] = trampoline; // Return address popped by ContextSwitch ret
+            sp[8] = trampoline; // Return address popped by ContextSwitch ret
 
             tcb->CurrentRsp = (ulong)sp;
 
@@ -193,21 +205,25 @@ namespace Kernel.Scheduling
             if (priority < 0) priority = 0;
             if (priority > 3) priority = 3;
 
-            ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc(256);
+            ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc((ulong)sizeof(ThreadControlBlock));
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
             tcb->IsExecuting = 0;
             tcb->RemainingTicks = GetPriorityTimeslice(priority);
-            tcb->IsExecuting = 0;
             tcb->TotalTicks = 0;
             tcb->EntryPoint = null;
+            tcb->Next = null;
+
+            // Initialize clean FPU/SSE/AVX state
+            *(ushort*)&tcb->FpuState[0] = 0x037F;
+            *(uint*)&tcb->FpuState[24] = 0x1F80;
+            *(ulong*)&tcb->FpuState[512] = 7;
 
             ThreadControlBlock* current = CurrentThread;
-            tcb->CSpaceRoot = current != null ? current->CSpaceRoot : null;
-            tcb->CSpaceRootAddress = current != null ? current->CSpaceRootAddress : 0;
-            tcb->Pml4Address = pml4 != 0 ? pml4 : (current != null ? current->Pml4Address : Cpu.ReadCr3());
-            tcb->Next = null;
+            tcb->CSpaceRoot = (current != null && current->CSpaceRoot != null) ? current->CSpaceRoot : (MainThread != null ? MainThread->CSpaceRoot : null);
+            tcb->CSpaceRootAddress = (ulong)tcb->CSpaceRoot;
+            tcb->Pml4Address = pml4 != 0 ? pml4 : (current != null ? current->Pml4Address : s_kernelPml4Phys);
 
             tcb->IpcWaitNext = null;
             tcb->ReplyTarget = null;
@@ -215,35 +231,38 @@ namespace Kernel.Scheduling
             tcb->BoundNotification = null;
             tcb->IpcMessageInfo = 0;
             tcb->IpcBadge = 0;
+            tcb->UserRsp = userRsp;
 
-            // Allocate 16 KiB kernel stack (4 contiguous physical 4K pages)
+            // Allocate 16 KiB kernel stack
             ulong physStack = PageFrameAllocator.AllocateContiguousFrames(4);
             ulong virtStack = Hhdm.PhysicalToVirtual(physStack);
             tcb->KernelStackBase = virtStack;
             tcb->KernelStackTop = (virtStack + 16384) & ~15UL;
 
-            // User Thread Stack Synthesis
+            // User Thread Stack Synthesis (8 callee-saved registers + trampoline + 5 iretq qwords = 14 qwords = 112 bytes)
             ulong stackTop = tcb->KernelStackTop;
-            ulong* sp = (ulong*)(stackTop - 96);
+            ulong* sp = (ulong*)(stackTop - 112);
             sp[0] = 0; // r15
             sp[1] = 0; // r14
             sp[2] = 0; // r13
             sp[3] = 0; // r12
-            sp[4] = 0; // rbp
-            sp[5] = 0; // rbx
+            sp[4] = 0; // rsi
+            sp[5] = 0; // rdi
+            sp[6] = 0; // rbp
+            sp[7] = 0; // rbx
 
             ulong trampoline = Cpu.GetUserThreadTrampoline();
             if (trampoline < Hhdm.Base)
             {
                 trampoline += Hhdm.Base;
             }
-            sp[6] = trampoline; // ContextSwitch ret target
+            sp[8] = trampoline; // ContextSwitch ret target
 
-            sp[7]  = entryRip;        // iretq [rsp + 0] : User RIP
-            sp[8]  = 0x23UL;          // iretq [rsp + 8] : User CS (0x20 | 3)
-            sp[9]  = 0x3202UL;        // iretq [rsp + 16]: User RFLAGS (IF=1, IOPL=3)
-            sp[10] = userRsp & ~15UL; // iretq [rsp + 24]: User RSP (16-byte aligned)
-            sp[11] = 0x1BUL;          // iretq [rsp + 32]: User SS (0x18 | 3)
+            sp[9]  = entryRip;        // iretq [rsp + 0] : User RIP
+            sp[10] = 0x23UL;          // iretq [rsp + 8] : User CS (0x20 | 3)
+            sp[11] = 0x3202UL;        // iretq [rsp + 16]: User RFLAGS (IF=1, IOPL=3)
+            sp[12] = userRsp & ~15UL; // iretq [rsp + 24]: User RSP (16-byte aligned)
+            sp[13] = 0x1BUL;          // iretq [rsp + 32]: User SS (0x18 | 3)
 
             tcb->CurrentRsp = (ulong)sp;
 
@@ -357,7 +376,7 @@ namespace Kernel.Scheduling
 
             prev->Rflags = rflags;
 
-            Cpu.ContextSwitch(&prev->CurrentRsp, target->CurrentRsp, (prev != null) ? (int*)&prev->IsExecuting : null);
+            Cpu.ContextSwitch(prev, target);
 
             s_schedLock.Release(CurrentThread->Rflags);
         }
@@ -444,6 +463,7 @@ namespace Kernel.Scheduling
 
         public static void ScheduleLocked(ulong rflags)
         {
+            ReapZombies();
             ThreadControlBlock* next = DequeueNextReadyUnlocked();
 
             if (next == null)
@@ -492,9 +512,82 @@ namespace Kernel.Scheduling
             prev->Rflags = rflags;
 
             // Execute assembly context switch
-            Cpu.ContextSwitch(&prev->CurrentRsp, next->CurrentRsp, (prev != null) ? (int*)&prev->IsExecuting : null);
+            Cpu.ContextSwitch(prev, next);
 
             s_schedLock.Release(CurrentThread->Rflags);
+        }
+
+        public static void ReapZombies()
+        {
+            if (s_zombieList == null) return;
+
+            ulong oldVal = (ulong)s_zombieList;
+            fixed (ThreadControlBlock** pList = &s_zombieList)
+            {
+                ulong* pAtomic = (ulong*)pList;
+                while (true)
+                {
+                    if (oldVal == 0) return;
+                    ulong prev = Cpu.AtomicCompareExchange64(pAtomic, 0, oldVal);
+                    if (prev == oldVal) break;
+                    oldVal = prev;
+                }
+            }
+
+            ThreadControlBlock* list = (ThreadControlBlock*)oldVal;
+            ThreadControlBlock* stillZombie = null;
+
+            while (list != null)
+            {
+                ThreadControlBlock* next = list->Next;
+
+                // Ensure ReapZombies() explicitly ignores the idle thread and main BSP thread (TID 0 and TID 1)
+                // so core execution stacks are never queued for deallocation.
+                if (list->Id == 0 || list->Id == 1 || list == MainThread || list == IdleThread)
+                {
+                    list = next;
+                    continue;
+                }
+
+                // Only reap if thread has fully vacated CPU cores and is not currently executing
+                if (list->IsExecuting == 0 && list != CurrentThread)
+                {
+                    if (list->KernelStackBase != 0)
+                    {
+                        ulong phys = Hhdm.VirtualToPhysical(list->KernelStackBase);
+                        PageFrameAllocator.FreeContiguousFrames(phys, 4);
+                        list->KernelStackBase = 0;
+                    }
+                    list->State = ThreadState.Dead;
+                    SlabAllocator.KmFree(list, (ulong)sizeof(ThreadControlBlock));
+                }
+                else
+                {
+                    list->Next = stillZombie;
+                    stillZombie = list;
+                }
+
+                list = next;
+            }
+
+            if (stillZombie != null)
+            {
+                fixed (ThreadControlBlock** pList = &s_zombieList)
+                {
+                    ulong* pAtomic = (ulong*)pList;
+                    while (true)
+                    {
+                        ThreadControlBlock* oldHead = s_zombieList;
+                        ThreadControlBlock* tail = stillZombie;
+                        while (tail->Next != null) tail = tail->Next;
+                        tail->Next = oldHead;
+                        if ((ThreadControlBlock*)Cpu.AtomicCompareExchange64(pAtomic, (ulong)stillZombie, (ulong)oldHead) == oldHead)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         public static void TerminateCurrentThread()
@@ -503,7 +596,8 @@ namespace Kernel.Scheduling
             ThreadControlBlock* curr = CurrentThread;
             if (curr != null)
             {
-                curr->State = ThreadState.Dead;
+                // Mark state as Zombie rather than immediately freeing
+                curr->State = ThreadState.Zombie;
                 
                 // Release execution guard so other cores don't spin-deadlock or fault
                 curr->IsExecuting = 0;
@@ -523,6 +617,24 @@ namespace Kernel.Scheduling
                 
                 curr->BoundEndpoint = null;
                 curr->BoundNotification = null;
+
+                // Queue to zombie list if not TID 0 or TID 1
+                if (curr->Id > 1 && curr != MainThread && curr != IdleThread)
+                {
+                    fixed (ThreadControlBlock** pList = &s_zombieList)
+                    {
+                        ulong* pAtomic = (ulong*)pList;
+                        while (true)
+                        {
+                            ThreadControlBlock* oldHead = s_zombieList;
+                            curr->Next = oldHead;
+                            if ((ThreadControlBlock*)Cpu.AtomicCompareExchange64(pAtomic, (ulong)curr, (ulong)oldHead) == oldHead)
+                            {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
             ScheduleLocked(rflags);
         }
@@ -544,6 +656,7 @@ namespace Kernel.Scheduling
             while (true)
             {
                 Cpu.EnableInterrupts();
+                ReapZombies();
                 if (!s_q0.IsEmpty || !s_q1.IsEmpty || !s_q2.IsEmpty || !s_q3.IsEmpty)
                 {
                     Schedule();

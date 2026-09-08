@@ -151,6 +151,14 @@ namespace Kernel.Memory.Physical
             }
         }
 
+        public static void FreeContiguousFrames(ulong physAddr, uint count)
+        {
+            for (uint i = 0; i < count; i++)
+            {
+                FreeFrame(physAddr + (ulong)i * PageSize);
+            }
+        }
+
         public static ulong AllocateContiguousFrames(uint count)
         {
             if (count == 0) return 0;

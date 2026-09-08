@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../../build/config/Driver.props" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>Userland.PieLoader</AssemblyName>
+    <RootNamespace>Userland.PieLoader</RootNamespace>
+    <NoStdLib>true</NoStdLib>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../common/MiniCoreLib/MiniCoreLib.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+  </ItemGroup>
+</Project>

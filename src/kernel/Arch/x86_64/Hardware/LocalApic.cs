@@ -7,6 +7,7 @@ namespace Kernel.Arch.x86_64.Hardware
     {
         private const ulong ApicBasePhys = 0xFEE00000;
         private static uint* s_apic;
+        public static volatile bool IsInitialized = false;
 
         public static void Initialize()
         {
@@ -29,6 +30,8 @@ namespace Kernel.Arch.x86_64.Hardware
 
             // 5. Initial Count Register (0x380): Fast deterministic periodic ticks in QEMU
             WriteRegister(0x380, 0x100000);
+
+            IsInitialized = true;
         }
 
         public static void InitializeAp()

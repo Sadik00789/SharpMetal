@@ -54,9 +54,16 @@ namespace Kernel.Memory.Virtual
                     LocalApic.BroadcastIpi(VectorTlbShootdown, excludeSelf: true);
 
                     // Spin-wait with pause while keeping interrupts enabled
-                    while (s_context.PendingAcks > 0)
+                    ulong timeout = 50_000_000;
+                    while (s_context.PendingAcks > 0 && timeout > 0)
                     {
                         Cpu.Pause();
+                        timeout--;
+                    }
+
+                    if (timeout == 0 && s_context.PendingAcks > 0)
+                    {
+                        Kernel.Diagnostics.EarlySerial.WriteLine("[WARN] SMP TLB shootdown ACK timeout; proceeding.");
                     }
                 }
                 finally

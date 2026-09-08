@@ -15,7 +15,8 @@ namespace Kernel.Scheduling
         BlockedOnReceive = 5,
         BlockedOnReply = 6,
         BlockedOnNotification = 7,
-        BlockedOnAny = 8
+        BlockedOnAny = 8,
+        Zombie = 9
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -46,5 +47,11 @@ namespace Kernel.Scheduling
         public ulong UserRsp;                   // Phase 6 saved user-space RSP
         public ulong Rflags;                    // Saved RFLAGS for SMP scheduler lock release
         public volatile int IsExecuting;        // SMP concurrent execution guard (1 = executing, 0 = idle)
+
+        // Padding to align FpuState to a 64-byte boundary at offset 256 (0x100)
+        private fixed byte _padTo256[44];
+
+        // Extended 832-byte buffer for x87, SSE, and AVX YMM register state (XSAVE/XRSTOR)
+        public fixed byte FpuState[832];
     }
 }

@@ -257,10 +257,19 @@ namespace StorageNvme
             uint sqIdx = s_iosqTail & QueueMask;
             uint cqIdx = s_iocqHead & QueueMask;
 
+            ulong prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
             Iosq[sqIdx].Opcode = NvmeOpcodes.Read;
             Iosq[sqIdx].CommandId = s_cmdId++;
             Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
+            Iosq[sqIdx].Prp1 = prp1;
+            if ((prp1 & 0xFFFUL) + 512UL > 4096UL)
+            {
+                Iosq[sqIdx].Prp2 = (prp1 & ~0xFFFUL) + 4096UL;
+            }
+            else
+            {
+                Iosq[sqIdx].Prp2 = 0;
+            }
             Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
             Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
             Iosq[sqIdx].Cdw12 = 0; // 1 block
@@ -291,10 +300,19 @@ namespace StorageNvme
             uint sqIdx = s_iosqTail & QueueMask;
             uint cqIdx = s_iocqHead & QueueMask;
 
+            ulong writePrp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
             Iosq[sqIdx].Opcode = NvmeOpcodes.Write;
             Iosq[sqIdx].CommandId = s_cmdId++;
             Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
+            Iosq[sqIdx].Prp1 = writePrp1;
+            if ((writePrp1 & 0xFFFUL) + 512UL > 4096UL)
+            {
+                Iosq[sqIdx].Prp2 = (writePrp1 & ~0xFFFUL) + 4096UL;
+            }
+            else
+            {
+                Iosq[sqIdx].Prp2 = 0;
+            }
             Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
             Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
             Iosq[sqIdx].Cdw12 = 0; // 1 block

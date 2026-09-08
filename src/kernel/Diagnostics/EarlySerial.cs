@@ -42,12 +42,49 @@ namespace Kernel.Diagnostics
         }
 
         private static Concurrency.SpinLockWithIrqSave s_serialLock;
+        private static volatile int s_lockOwner = -1;
+        private static int s_recursionDepth = 0;
 
         public static ulong AcquireLock()
         {
-            return s_serialLock.Acquire();
+            ulong rflags = Cpu.ReadRflags();
+            Cpu.DisableInterrupts();
+
+            int coreId = LocalApic.IsInitialized ? CpuTopology.GetCurrentCoreIndex() : 0;
+            if (s_lockOwner == coreId)
+            {
+                s_recursionDepth++;
+                return rflags;
+            }
+
+            s_serialLock.Lock.Acquire();
+            s_lockOwner = coreId;
+            s_recursionDepth = 1;
+            return rflags;
         }
-        public static void ReleaseLock(ulong rflags) => s_serialLock.Release(rflags);
+
+        public static void ReleaseLock(ulong rflags)
+        {
+            int coreId = LocalApic.IsInitialized ? CpuTopology.GetCurrentCoreIndex() : 0;
+            if (s_lockOwner == coreId)
+            {
+                s_recursionDepth--;
+                if (s_recursionDepth == 0)
+                {
+                    s_lockOwner = -1;
+                    s_serialLock.Lock.Release();
+                }
+            }
+
+            Cpu.RestoreRflags(rflags);
+        }
+
+        public static void ForceResetLock()
+        {
+            s_serialLock.Lock.Serving = s_serialLock.Lock.NextTicket;
+            s_lockOwner = -1;
+            s_recursionDepth = 0;
+        }
 
         public static void WriteCharInternal(char c)
         {
@@ -69,14 +106,14 @@ namespace Kernel.Diagnostics
         public static void WriteChar(char c)
         {
             if (!s_isSupported) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteCharInternal(c);
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
@@ -94,21 +131,21 @@ namespace Kernel.Diagnostics
         public static void Write(string s)
         {
             if (!s_isSupported || s == null) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteInternal(s);
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
         public static unsafe void WriteBytes(byte* msg)
         {
             if (!s_isSupported || msg == null) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 int limit = 2048;
@@ -121,14 +158,14 @@ namespace Kernel.Diagnostics
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
         public static void WriteLine(string s)
         {
             if (!s_isSupported) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteInternal(s);
@@ -137,14 +174,14 @@ namespace Kernel.Diagnostics
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
         public static void WriteLine()
         {
             if (!s_isSupported) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteCharInternal('\r');
@@ -152,7 +189,7 @@ namespace Kernel.Diagnostics
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
@@ -171,14 +208,14 @@ namespace Kernel.Diagnostics
         public static void WriteHex(ulong value)
         {
             if (!s_isSupported) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteHexInternal(value);
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
 
@@ -202,14 +239,14 @@ namespace Kernel.Diagnostics
         public static void WriteDec(long value)
         {
             if (!s_isSupported) return;
-            ulong rflags = s_serialLock.Acquire();
+            ulong rflags = AcquireLock();
             try
             {
                 WriteDecInternal(value);
             }
             finally
             {
-                s_serialLock.Release(rflags);
+                ReleaseLock(rflags);
             }
         }
     }

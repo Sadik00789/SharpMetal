@@ -20,8 +20,11 @@ namespace Supervisor
             // 3. Coordinate Function-Level Reset via PciServiceClient on endpoint 6
             var pciClient = new PciServiceClient(endpointCptr: 6);
             // Wait for storage and filesystem to fully mount before triggering destructive FLR test
-             SyscallWrappers.Log("[SUPERVISOR] Waiting for storage and filesystem stabilization...\n");
-             for (int i = 0; i < 5000000; i++) { /* spin */ }
+            SyscallWrappers.Log("[SUPERVISOR] Waiting for storage and filesystem stabilization...\n");
+            for (int i = 0; i < 200; i++)
+            {
+                SyscallWrappers.Yield();
+            }
              pciClient.TriggerFlr(0, 0, 0);
 
             // 4. Teardown faulted child address space & reincarnate service

@@ -4,6 +4,23 @@ using Userland.Runtime.ZeroAlloc.Interop;
 
 namespace InputHid
 {
+    public static unsafe class LocalApic
+    {
+        public const ulong ApicBasePhys = 0xFEE00000UL;
+        public const ulong ApicBaseVirt = 0x50000000UL;
+        public static bool IsInitialized = false;
+
+        public static void SendEoi()
+        {
+            if (!IsInitialized)
+            {
+                SyscallWrappers.MapMmio(ApicBasePhys, ApicBaseVirt, 4096, writeCombining: false);
+                IsInitialized = true;
+            }
+            *(uint*)(ApicBaseVirt + 0x0B0) = 0;
+        }
+    }
+
     public static class Ps2Keyboard
     {
         [DllImport("*")]
@@ -20,6 +37,30 @@ namespace InputHid
         private static bool s_extended = false;
         private static byte s_pending0 = 0;
         private static byte s_pending1 = 0;
+
+        public static uint HandleInterrupt(int vector = 33)
+        {
+            try
+            {
+                return ReadKey();
+            }
+            finally
+            {
+                LocalApic.SendEoi();
+            }
+        }
+
+        public static void OnInterrupt33()
+        {
+            try
+            {
+                ReadKey();
+            }
+            finally
+            {
+                LocalApic.SendEoi();
+            }
+        }
 
         private static void WaitInputEmpty()
         {

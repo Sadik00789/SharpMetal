@@ -46,7 +46,7 @@ def main():
         bufsize=1
     )
 
-    matched = 0
+    output_buffer = ""
     deadline = time.time() + 45
     fault_lines = []
 
@@ -63,38 +63,40 @@ def main():
         if line:
             sys.stdout.write(line)
             sys.stdout.flush()
+            output_buffer += line
 
             # Track kernel panic lines for diagnostics (non-fatal if milestones pass)
             if "[FAULT]" in line or "Kernel Panic" in line:
                 fault_lines.append(line.rstrip())
 
-            # Check milestones in order
-            if matched < len(REQUIRED_MILESTONES):
-                if re.search(REQUIRED_MILESTONES[matched], line):
-                    matched += 1
-                    # All milestones verified: kill QEMU and declare success immediately.
-                    # We do NOT wait for QEMU to exit on its own (it may hang if a
-                    # non-critical server thread died after the milestones were logged).
-                    if matched == len(REQUIRED_MILESTONES):
-                        print("\n[+] All boot milestones successfully verified.")
-                        if fault_lines:
-                            print(f"[!] Note: {len(fault_lines)} kernel fault(s) observed (non-critical, milestones passed):")
-                            for fl in fault_lines:
-                                print(f"    {fl}")
-                        proc.kill()
-                        try:
-                            proc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
-                            proc.wait()
-                        sys.exit(0)
+            # Check all milestones against accumulated buffer
+            all_matched = True
+            for m in REQUIRED_MILESTONES:
+                if not re.search(m, output_buffer):
+                    all_matched = False
+                    break
+
+            if all_matched:
+                print("\n[+] All boot milestones successfully verified.")
+                if fault_lines:
+                    print(f"[!] Note: {len(fault_lines)} kernel fault(s) observed (non-critical, milestones passed):")
+                    for fl in fault_lines:
+                        print(f"    {fl}")
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                sys.exit(0)
 
     # Loop ended without matching all milestones
-    if matched == len(REQUIRED_MILESTONES):
+    unmatched = [m for m in REQUIRED_MILESTONES if not re.search(m, output_buffer)]
+    if not unmatched:
         print("\n[+] All boot milestones successfully verified.")
         sys.exit(0)
     else:
-        print(f"\n[-] Failed to match milestone {matched}: {REQUIRED_MILESTONES[matched]}")
+        print(f"\n[-] Failed to match milestones: {unmatched}")
         sys.exit(1)
 
 if __name__ == "__main__":

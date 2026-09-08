@@ -4,6 +4,7 @@ namespace Microkernel.Abstractions.Syscalls
     {
         // Phase 4 primitives
         public const ulong SysYield   = 0x01;
+        public const ulong Yield      = SysYield;
         public const ulong SysGetTid  = 0x02;
         public const ulong SysLog          = 0x03;
         public const ulong SysExit         = 0x04;
