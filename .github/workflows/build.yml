@@ -13,10 +13,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup .NET 9
+      - name: Setup .NET 10
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '9.0.x'
+          dotnet-version: '10.0.x'
 
       - name: Install Build Dependencies
         run: |
@@ -28,7 +28,7 @@ jobs:
           mkdir -p /tmp/ilc_init
           cd /tmp/ilc_init
           dotnet new console --no-restore
-          dotnet add package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0
+          dotnet add package runtime.linux-x64.Microsoft.DotNet.ILCompiler
           cd -
           rm -rf /tmp/ilc_init
 

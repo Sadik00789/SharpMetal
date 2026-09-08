@@ -91,6 +91,7 @@ RhpAssignRef:
 
 global RhpStelemRef
 global RhpNewArray
+global RhpNewArrayFast
 
 RhpStelemRef:
     mov [rcx], rdx
@@ -101,6 +102,7 @@ RhpNewFast:
     ret
 .static_obj_buf: times 256 db 0
 
+RhpNewArrayFast:
 RhpNewArray:
     ; rcx = MethodTable*
     ; rdx = length

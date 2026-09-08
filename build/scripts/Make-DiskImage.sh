@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+TFM="net10.0"
 
 export PATH="${HOME}/.dotnet:${HOME}/.local/bin:${PATH}"
 export LD_LIBRARY_PATH="${HOME}/.local/usr/lib64:${LD_LIBRARY_PATH:-}"
@@ -83,8 +84,11 @@ echo "=== [1/6] Locating Native AOT Compiler (ilc) ==="
 
 # 1. Check if ILC is already set in environment and executable
 if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    # Search local NuGet package cache
-    ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | head -n 1 || true)
+    # Search local NuGet package cache for .NET 10 ILCompiler first
+    ILC=$(find "$HOME/.nuget/packages" -path "*/runtime.*.microsoft.dotnet.ilcompiler/10.*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+    if [ -z "$ILC" ]; then
+        ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+    fi
 fi
 
 # 2. If not found, explicitly restore the compiler package into the NuGet cache
@@ -102,12 +106,15 @@ if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
     TMP_RESTORE="${TMP_DIR}/ilc_restore"
     mkdir -p "$TMP_RESTORE"
     dotnet new console -o "$TMP_RESTORE" --no-restore >/dev/null 2>&1 || true
-    if ! dotnet add "$TMP_RESTORE" package "$ILC_PKG" -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1; then
+    if ! dotnet add "$TMP_RESTORE" package "$ILC_PKG" --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1; then
         echo "[-] Fallback: Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..." >&2
-        dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler -v 9.0.0 --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
+        dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
     fi
     rm -rf "$TMP_RESTORE"
-    ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | head -n 1 || true)
+    ILC=$(find "$HOME/.nuget/packages" -path "*/runtime.*.microsoft.dotnet.ilcompiler/10.*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+    if [ -z "$ILC" ]; then
+        ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+    fi
 fi
 
 if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
@@ -129,12 +136,12 @@ export ILC_BIN
 
 echo "[AOT] Compiling roottask via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/net9.0/Userland.Runtime.Gc.dll" \
-    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.obj" \
+    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
+    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -146,7 +153,7 @@ echo "[AOT] Compiling roottask via Native AOT (ilc)..."
 
 echo "[NASM] Assembling RoottaskEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/roottask/RoottaskEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/RoottaskEntry.obj"
+    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/RoottaskEntry.obj"
 
 echo "[LINK] Linking roottask.exe via lld-link..."
 lld-link \
@@ -156,20 +163,20 @@ lld-link \
     /subsystem:console \
     /entry:RoottaskEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.exe" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/RoottaskEntry.obj" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.obj"
+    /out:"${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.exe" \
+    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/RoottaskEntry.obj" \
+    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.obj"
 
-cp "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.exe" \
-   "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.bin"
+cp "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.exe" \
+   "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin"
 
 echo "[AOT] Compiling pci_server via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.obj" \
+    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -178,7 +185,7 @@ echo "[AOT] Compiling pci_server via Native AOT (ilc)..."
 
 echo "[NASM] Assembling PciServerEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/pci_server/PciServerEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/PciServerEntry.obj"
+    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/PciServerEntry.obj"
 
 echo "[LINK] Linking pci_server.exe via lld-link..."
 lld-link \
@@ -188,20 +195,20 @@ lld-link \
     /subsystem:console \
     /entry:PciServerEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.exe" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/PciServerEntry.obj" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.obj"
+    /out:"${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.exe" \
+    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/PciServerEntry.obj" \
+    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.obj"
 
-cp "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.exe" \
-   "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.bin"
+cp "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.exe" \
+   "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.bin"
 
 echo "[AOT] Compiling display_server via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.obj" \
+    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -212,7 +219,7 @@ echo "[AOT] Compiling display_server via Native AOT (ilc)..."
 
 echo "[NASM] Assembling DisplayServerEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/display_server/DisplayServerEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/DisplayServerEntry.obj"
+    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/DisplayServerEntry.obj"
 
 echo "[LINK] Linking display_server.exe via lld-link..."
 lld-link \
@@ -222,20 +229,20 @@ lld-link \
     /subsystem:console \
     /entry:DisplayServerEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.exe" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/DisplayServerEntry.obj" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.obj"
+    /out:"${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.exe" \
+    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/DisplayServerEntry.obj" \
+    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.obj"
 
-cp "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.exe" \
-   "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.bin"
+cp "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.exe" \
+   "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.bin"
 
 echo "[AOT] Compiling supervisor via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.obj" \
+    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -244,7 +251,7 @@ echo "[AOT] Compiling supervisor via Native AOT (ilc)..."
 
 echo "[NASM] Assembling SupervisorEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/supervisor/SupervisorEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/SupervisorEntry.obj"
+    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/SupervisorEntry.obj"
 
 echo "[LINK] Linking supervisor.exe via lld-link..."
 lld-link \
@@ -254,20 +261,20 @@ lld-link \
     /subsystem:console \
     /entry:SupervisorEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.exe" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/SupervisorEntry.obj" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.obj"
+    /out:"${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.exe" \
+    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/SupervisorEntry.obj" \
+    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.obj"
 
-cp "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.exe" \
-   "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.bin"
+cp "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.exe" \
+   "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin"
 
 echo "[AOT] Compiling storage.nvme via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.obj" \
+    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -276,7 +283,7 @@ echo "[AOT] Compiling storage.nvme via Native AOT (ilc)..."
 
 echo "[NASM] Assembling StorageNvmeEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/drivers/storage.nvme/StorageNvmeEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/StorageNvmeEntry.obj"
+    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/StorageNvmeEntry.obj"
 
 echo "[LINK] Linking storage.nvme.exe via lld-link..."
 lld-link \
@@ -286,20 +293,20 @@ lld-link \
     /subsystem:console \
     /entry:StorageNvmeEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.exe" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/StorageNvmeEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.obj"
+    /out:"${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.exe" \
+    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/StorageNvmeEntry.obj" \
+    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.obj"
 
-cp "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.exe" \
-   "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.bin"
+cp "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.exe" \
+   "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin"
 
 echo "[AOT] Compiling input.hid via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.obj" \
+    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -310,7 +317,7 @@ echo "[AOT] Compiling input.hid via Native AOT (ilc)..."
 
 echo "[NASM] Assembling InputHidEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/drivers/input.hid/InputHidEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/InputHidEntry.obj"
+    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/InputHidEntry.obj"
 
 echo "[LINK] Linking input.hid.exe via lld-link..."
 lld-link \
@@ -320,20 +327,20 @@ lld-link \
     /subsystem:console \
     /entry:InputHidEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.exe" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/InputHidEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.obj"
+    /out:"${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.exe" \
+    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/InputHidEntry.obj" \
+    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.obj"
 
-cp "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.exe" \
-   "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.bin"
+cp "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.exe" \
+   "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin"
 
 echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.obj" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -342,7 +349,7 @@ echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
 
 echo "[NASM] Assembling VirtioNetEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/drivers/net.virtio/VirtioNetEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/VirtioNetEntry.obj"
+    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/VirtioNetEntry.obj"
 
 echo "[LINK] Linking net.virtio.exe via lld-link..."
 lld-link \
@@ -352,20 +359,20 @@ lld-link \
     /subsystem:console \
     /entry:VirtioNetEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.exe" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/VirtioNetEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.obj"
+    /out:"${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.exe" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/VirtioNetEntry.obj" \
+    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.obj"
 
-cp "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.exe" \
-   "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.bin"
+cp "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.exe" \
+   "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin"
 
 echo "[AOT] Compiling fs.fat32 via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.obj" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -374,7 +381,7 @@ echo "[AOT] Compiling fs.fat32 via Native AOT (ilc)..."
 
 echo "[NASM] Assembling Fat32Entry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/servers/fs.fat32/Fat32Entry.asm" \
-    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/Fat32Entry.obj"
+    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/Fat32Entry.obj"
 
 echo "[LINK] Linking fs.fat32.exe via lld-link..."
 lld-link \
@@ -384,23 +391,23 @@ lld-link \
     /subsystem:console \
     /entry:Fat32Entry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.exe" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/Fat32Entry.obj" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.obj"
+    /out:"${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/Fat32Entry.obj" \
+    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.obj"
 
-cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.exe" \
-   "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.bin"
+cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
+   "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin"
 
 echo "[AOT] Compiling shell via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/net9.0/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/net9.0/Userland.Runtime.Gc.dll" \
-    -r "${REPO_ROOT}/src/libs/Microkernel.Drawing/bin/x64/Release/net9.0/Microkernel.Drawing.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/net9.0/Microkernel.Vfs.dll" \
-    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.obj" \
+    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
+    -r "${REPO_ROOT}/src/libs/Microkernel.Drawing/bin/x64/Release/${TFM}/Microkernel.Drawing.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
+    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -410,7 +417,7 @@ echo "[AOT] Compiling shell via Native AOT (ilc)..."
 
 echo "[NASM] Assembling ShellEntry.asm..."
 nasm -f win64 -i"${REPO_ROOT}/" "${REPO_ROOT}/src/apps/shell/ShellEntry.asm" \
-    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/ShellEntry.obj"
+    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/ShellEntry.obj"
 
 echo "[LINK] Linking shell.exe via lld-link..."
 lld-link \
@@ -420,19 +427,19 @@ lld-link \
     /subsystem:console \
     /entry:ShellEntry \
     /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.exe" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/ShellEntry.obj" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.obj"
+    /out:"${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.exe" \
+    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/ShellEntry.obj" \
+    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.obj"
 
-cp "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.exe" \
-   "${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.bin"
+cp "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.exe" \
+   "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin"
 
 echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
 "$ILC" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Kernel.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/net9.0/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/net9.0/Microkernel.Abstractions.dll" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Kernel.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.obj" \
     --targetos windows \
     --targetarch x64 \
     --systemmodule MiniCoreLib \
@@ -495,27 +502,27 @@ nasm -f bin "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.asm" \
 
 echo "[NASM] Assembling Entry.asm..."
 nasm -f win64 -i"${REPO_ROOT}/" "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/Entry.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Entry.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Entry.obj"
 
 echo "[NASM] Assembling DescriptorFlush.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/DescriptorFlush.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/DescriptorFlush.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/DescriptorFlush.obj"
 
 echo "[NASM] Assembling IsrTrampolines.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/IsrTrampolines.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/IsrTrampolines.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/IsrTrampolines.obj"
 
 echo "[NASM] Assembling ContextSwitch.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ContextSwitch.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/ContextSwitch.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/ContextSwitch.obj"
 
 echo "[NASM] Assembling SyscallEntry.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/SyscallEntry.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/SyscallEntry.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/SyscallEntry.obj"
 
 echo "[NASM] Assembling UserTransition.asm..."
 nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/UserTransition.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/UserTransition.obj"
+    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/UserTransition.obj"
 
 echo "[LINK] Linking BOOTX64.EFI via lld-link..."
 lld-link \
@@ -525,13 +532,13 @@ lld-link \
     /subsystem:efi_application \
     /entry:EfiMain \
     /out:"${REPO_ROOT}/build/BOOTX64.EFI" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Kernel.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/Entry.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/DescriptorFlush.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/IsrTrampolines.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/ContextSwitch.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/SyscallEntry.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/net9.0/UserTransition.obj"
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Entry.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/DescriptorFlush.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/IsrTrampolines.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/ContextSwitch.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/SyscallEntry.obj" \
+    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/UserTransition.obj"
 
 echo "[STAGE] Staging EFI System Partition directory..."
 ESP_DIR="${REPO_ROOT}/build/esp"
@@ -542,15 +549,15 @@ echo '\EFI\BOOT\BOOTX64.EFI' > "${ESP_DIR}/startup.nsh"
 echo "[PACK] Packaging initial ramdisk (INITRD.IMG)..."
 python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
     "${ESP_DIR}/EFI/BOOT/INITRD.IMG" \
-    roottask="${REPO_ROOT}/src/servers/roottask/bin/x64/Release/net9.0/roottask.bin" \
-    pci_server.bin="${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/net9.0/pci_server.bin" \
-    display_server.bin="${REPO_ROOT}/src/servers/display_server/bin/x64/Release/net9.0/display_server.bin" \
-    supervisor.bin="${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/net9.0/supervisor.bin" \
-    storage.nvme.bin="${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/net9.0/storage.nvme.bin" \
-    input.hid.bin="${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/net9.0/input.hid.bin" \
-    net.virtio.bin="${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/net9.0/net.virtio.bin" \
-    fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/net9.0/fs.fat32.bin" \
-    shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/net9.0/shell.bin"
+    roottask="${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin" \
+    pci_server.bin="${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.bin" \
+    display_server.bin="${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.bin" \
+    supervisor.bin="${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin" \
+    storage.nvme.bin="${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin" \
+    input.hid.bin="${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin" \
+    net.virtio.bin="${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin" \
+    fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin" \
+    shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin"
 
 # Constraint 1: Rootless FAT32 Disk Staging
 NVME_IMG="${REPO_ROOT}/build/nvme.img"

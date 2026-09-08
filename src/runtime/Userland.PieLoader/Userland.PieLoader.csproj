@@ -5,7 +5,7 @@
     <AssemblyName>Userland.PieLoader</AssemblyName>
     <RootNamespace>Userland.PieLoader</RootNamespace>
     <NoStdLib>true</NoStdLib>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>

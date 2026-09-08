@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/github/v/release/sadik00789/SharpMetal?color=brightgreen)](https://github.com/sadik00789/SharpMetal/releases/latest)
 [![Architecture](https://img.shields.io/badge/Architecture-x86--64-blue.svg)](https://en.wikipedia.org/wiki/X86-64)
 [![SMP](https://img.shields.io/badge/SMP-Dynamic%20Multiprocessing%20%28ACPI%20MADT%29-teal.svg)]()
-[![Runtime](https://img.shields.io/badge/.NET%209-Native%20AOT%20Freestanding-512BD4.svg)](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
+[![Runtime](https://img.shields.io/badge/.NET%2010%20LTS-Native%20AOT%20Freestanding-512BD4.svg)](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
 [![Firmware](https://img.shields.io/badge/Firmware-UEFI%202.x%20Direct-brightgreen.svg)](https://uefi.org/)
 [![IPC](https://img.shields.io/badge/IPC-Capability--Based%20%28seL4--Style%29-orange.svg)]()
 [![SIMD](https://img.shields.io/badge/Compositor-AVX2%20256--bit-yellowgreen.svg)]()
@@ -255,7 +255,7 @@ To build the microkernel from source, ensure your host build system (Linux x86-6
 ```bash
 # Ubuntu / Debian
 sudo apt-get update
-sudo apt-get install -y dotnet-sdk-9.0 nasm lld qemu-system-x86 ovmf parted mtools xorriso python3
+sudo apt-get install -y dotnet-sdk-10.0 nasm lld qemu-system-x86 ovmf parted mtools xorriso python3
 
 # Arch Linux
 sudo pacman -S dotnet-sdk nasm lld qemu-system-x86 edk2-ovmf parted mtools xorriso python

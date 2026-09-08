@@ -5,7 +5,7 @@
     <AssemblyName>pci_server</AssemblyName>
     <RootNamespace>PciServer</RootNamespace>
     <NoStdLib>true</NoStdLib>
-    <TargetFramework>net9.0</TargetFramework>
+    <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
 
   <ItemGroup>
