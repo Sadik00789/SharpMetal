@@ -92,12 +92,12 @@ graph TD
 | **1** | **Firmware Boot & Memory Map** | Direct UEFI 2.x application boot (`BOOTX64.EFI`) via `EfiMain.cs`. Resolves GOP framebuffer, parses ACPI RSDP, locates `INITRD.IMG`, extracts memory descriptors, and executes `ExitBootServices` with zero post-exit allocations. |
 | **2** | **Higher-Half Handover & Paging** | Creates identity and higher-half direct map (HHDM) 4-level page tables at `0xFFFF_8000_0000_0000`. Programs IA32_PAT for Write-Combining (WC) on GOP framebuffer and jumps to higher-half `KernelMainHigh`. `DestroyAddressSpace` iteratively reclaims the user half (PML4 0–255; kernel half 256–511 preserved), handling 1GB/2MB huge pages (`PAGE_SIZE_BIT`) and guarding every free with `PageFrameAllocator.IsRam` so GOP/PCI MMIO is never returned to the PMM; wired into `ReapZombies` and supervisor reincarnation. |
 | **3** | **Hardware Descriptors & Slab Heap** | Installs 64-bit Global Descriptor Table (GDT), 256-gate Interrupt Descriptor Table (IDT), per-core Task State Segment (TSS) with isolated 16 KiB RSP0 stacks, masks 8259 PIC, parses ACPI MADT for multi-core topology, calibrates the Local APIC timer (divide-by-16) against the 8254 PIT (channel 0, divisor 11932 ≈ 10ms; `ticksPerMs = elapsed/10`, periodic `INIT = ticksPerMs × QuantumMs`, vector 32), and initializes multi-pool slab allocator. |
-| **4** | **Threading & Preemptive MLFQ** | Implements Dynamic SMP preemptive Multi-Level Feedback Queue scheduler (supporting up to 16 cores dynamically enumerated via ACPI MADT) with 4 priority levels, AP INIT-SIPI-SIPI bootstrap, broadcast IPI TLB shootdown engine (`0xFD`, IRQ-safe `SpinLockWithIrqSave`), round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`, `IA32_GS_BASE`) for `SYSCALL`/`SYSRET`. `SyscallEntry.asm` hardens the FastPath return: `RCX` (RIP)/`R11` (RFLAGS) are spilled first to per-CPU kernel-stack scratch, `RDX/R10/R8/R9` preserved, payload returns only in `RAX`, and `RCX`/`R11` are restored immediately before `sysretq`. |
+| **4** | **Threading & Preemptive MLFQ** | Implements Dynamic SMP preemptive Multi-Level Feedback Queue scheduler (supporting up to 16 cores dynamically enumerated via ACPI MADT) with 4 priority levels, AP INIT-SIPI-SIPI bootstrap, broadcast IPI TLB shootdown engine (`0xFD`, IRQ-safe `SpinLockWithIrqSave`), round-robin timeslices, hardware context switching in NASM assembly, and MSR configuration (`STAR`, `LSTAR`, `FMASK`, `IA32_GS_BASE`) for `SYSCALL`/`SYSRET`. `SyscallEntry.asm` hardens the FastPath return: user `RSP` is swapped to the thread-local kernel stack (`[gs:16]`), 16-byte aligned (`and rsp, -16`), user `RIP` (`RCX`) and `RFLAGS` (`R11`) preserved on the kernel stack, `RDX/R10/R8/R9` preserved, payload returns in `RAX`, and `RCX`/`R11` are restored immediately before `sysretq`. `IA32_STAR[63:48]` is configured as `0x0010` so hardware `sysretq` calculates `User CS = 0x20 | 3` and `User SS = 0x18 | 3`. |
 | **5** | **Capability Space (CSpace) & CDT** | seL4-inspired authorization model. Resources (threads, endpoints, notifications, page frames, CNodes) are referenced via guarded capability pointers (`cptr`) with cryptographic badges and access rights (`Read`, `Write`, `Call`, `Grant`). Features a zero-alloc Capability Derivation Tree (CDT) enforcing recursive capability revocation and synchronous virtual memory unmapping/TLB invalidation. |
 | **6** | **Unified IPC Engine** | Dual-mode IPC supporting zero-copy synchronous rendezvous with timeslice donation (`sys_call`/`sys_reply`), 64-bit atomic asynchronous notifications (`sys_notify`), and unified dual-wait reactors (`sys_recv_any`). |
-| **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq`. |
+| **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq` using strict System V AMD64 ABI compliant `DropToUser` (`RDI=RIP`, `RSI=RSP`, `RDX=CR3`), static Win64 bridge `EnterUserMode`, 5-QWORD `iretq` frame (`User SS: 0x1B`, `User RSP`, `RFLAGS: 0x3202`, `User CS: 0x23`, `User RIP`), and full GPR scrubbing. |
 | **8** | **Dual Runtimes & Roslyn RPC** | **`Userland.Runtime.ZeroAlloc`**: Freestanding, allocation-free runtime backed by `NativeArena` with dynamic chunk-linked expansion (`ArenaChunk`) via high DMA aperture `0x0000_7000_0000_0000UL` for high-throughput driver workloads.<br/>**`Userland.Runtime.Gc`**: Generational mark-sweep micro-GC for user applications.<br/>**`Microkernel.RpcGenerator`**: Roslyn Source Generator emitting devirtualized zero-alloc RPC proxies. |
-| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`) and programs PCI MSI/MSI-X vectors (NVMe vector `0x30`, VirtIO-Net vector `0x31`). `storage.nvme` sets up 4 KiB contiguous rings (ASQ/ACQ, IOSQ/IOCQ) with interrupt notification dispatch. `net.virtio` drives modern VirtIO-Net via assigned MSI vectors with 16-bit virtqueue wraparound safety (`avail->idx`/`used->idx` as `ushort`, `slot = idx & (RingSize-1)`, wraparound-safe `used - lastUsed` delta) and a descriptor-visibility barrier before index publication. |
+| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`) and programs PCI MSI/MSI-X vectors (NVMe vector `0x30`, VirtIO-Net vector `0x31`). `storage.nvme` initializes Admin Queue Attributes (`AQA`), Submission Queue Base (`ASQ`), and Completion Queue Base (`ACQ`) with 64-entry contiguous rings prior to controller enablement (`CC.EN = 1`), executes verified canary block write/read at LBA 65535, and dispatches interrupt notifications. `net.virtio` drives modern VirtIO-Net via assigned MSI vectors with 16-bit virtqueue wraparound safety (`avail->idx`/`used->idx` as `ushort`, `slot = idx & (RingSize-1)`, wraparound-safe `used - lastUsed` delta) and a descriptor-visibility barrier before index publication. |
 | **10** | **FAT32 Filesystem Server & VFS** | `fs.fat32` mounts root block storage, parses BPB/FAT32 structures, and provides cluster-chain lookups. `Microkernel.Vfs` exposes clean `System.IO.File` APIs (`ReadAllText`, `ReadAllBytes`) using shared DMA pages. `Userland.PieLoader.LoadAndRelocateFromVfs` loads freestanding PIE binaries straight from FAT32 (PE section copy + `IMAGE_REL_BASED_DIR64` relocation); Ring-0 `SysSpawn (0x0B)` synthesizes the isolated address space, user/kernel stacks, CNode caps, and Ring 3 entry state. |
 | **11** | **Fault Recovery & Supervisor** | `supervisor` acts as a watchdog process. Intercepts crashed or faulty driver states, performs PCIe Function-Level Resets (FLR), reincarnates child server execution, and reconstructs IPC capability bindings. |
 | **12** | **Compositor & Graphic Shell** | `display_server` composites surfaces directly using AVX2 SIMD vector instructions (`vmovdqu`) with 8-bit alpha blending and dirty region clipping. `apps/shell` provides command history ring buffering, PSF2 font rendering, and integration commands. |
@@ -224,6 +224,13 @@ To eliminate dangling frame pointers and stale address translations:
 - **Atomic Serialization**: High-throughput `SysLog` calls use whole-message locking via `SpinLockWithIrqSave`, completely preventing concurrent inter-core character interleaving on early serial outputs.
 - **Broadcast IPI TLB Shootdown**: Synchronizes page table modifications across all active cores using vector `0xFD` inter-processor interrupts and atomic acknowledgment bitmask synchronization.
 
+### 8. System V AMD64 ABI Ring 3 Privilege Transition
+To guarantee rock-solid privilege transitions into userland:
+- **System V AMD64 ABI Compliance**: `DropToUser` strictly follows System V calling conventions (`RDI = RIP`, `RSI = RSP`, `RDX = CR3`). A static bridge `EnterUserMode` (`mov rdi, rcx; mov rsi, rdx; mov rdx, r8; jmp DropToUser`) supports Win64 callers without fragile runtime sniffing.
+- **Atomic 16-Byte Stack Alignment**: In `SyscallEntry.asm`, user `RSP` is swapped to thread-local kernel stack `[gs:16]` and aligned via `and rsp, -16`. This prevents 16-byte alignment traps (`#GP(0)`) on vector instructions (`movaps`) within Native AOT compiled kernel C# routines.
+- **Hardware Selector Arithmetic**: Explicit descriptors `UserDsSelector = 0x1B` (offset `0x18 | 3`) and `UserCsSelector = 0x23` (offset `0x20 | 3`) align with `IA32_STAR[63:48] = 0x0010`, ensuring `sysretq` computes target selectors `STAR[63:48] + 16` (`0x20 | 3 = 0x23`) and `STAR[63:48] + 8` (`0x18 | 3 = 0x1B`).
+- **GPR Scrubbing**: All general-purpose registers (`RAX`–`R15`) are zeroed prior to `iretq` execution to prevent kernel address and data leaks into Ring 3.
+
 ---
 
 ## Getting Started
@@ -233,7 +240,7 @@ To run the microkernel immediately without compiling the source code:
 
 ```bash
 # 1. Download pre-built disk image
-curl -LO [https://github.com/sadik00789/SharpMetal/releases/download/v1.0.0/disk.img](https://github.com/sadik00789/SharpMetal/releases/download/v1.0.0/disk.img)
+curl -LO https://github.com/sadik00789/SharpMetal/releases/download/v1.1.0/disk.img
 
 # 2. Create backing image for NVMe benchmark storage
 qemu-img create -f raw nvme.img 64M
@@ -274,7 +281,7 @@ This script automatically:
 5. Links `BOOTX64.EFI` and server binaries using `lld-link`.
 6. Packages all servers into `INITRD.IMG`.
 7. Creates a 64 MiB raw NVMe storage image (`build/nvme.img`).
-8. Creates a 64 MiB GPT-partitioned disk image (`build/images/disk.img`) with FAT32 EFI System Partition.
+8. Creates a 64 MiB GPT-partitioned disk image (`build/disk.img`) with FAT32 EFI System Partition.
 
 ### 2. Run in QEMU
 Launch the microkernel under QEMU with UEFI firmware, NVMe emulation, and serial console redirection:
@@ -291,7 +298,9 @@ bash build/scripts/Run-Qemu.sh
 ### 3. Run Automated End-to-End Test Suite
 Execute the automated regression harness:
 ```bash
-python3 build/scripts/Test-Harness.py --headless
+python3 build/scripts/Test-Harness.py
+# Or rebuild the disk image and test in one step:
+python3 build/scripts/Test-Harness.py --build
 ```
 The test harness builds the system, boots QEMU headlessly, streams serial logs, sequentially verifies all boot milestones (CSpace root, PCIe ECAM discovery, NVMe canary block write/read, VirtIO-Net packet transmission, FAT32 VFS read, and Shell interactive readiness), and terminates with a clean exit code `0`.
 
