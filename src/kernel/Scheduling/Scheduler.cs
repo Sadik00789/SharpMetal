@@ -558,6 +558,19 @@ namespace Kernel.Scheduling
                 // Only reap if thread has fully vacated CPU cores and is not currently executing
                 if (list->IsExecuting == 0 && list != CurrentThread)
                 {
+                    // Phase 1: reclaim user address space (user half only) before TCB free.
+                    // Skip shared kernel address space (PML4 == kernel PML4 / CR3 owner).
+                    ulong pml4 = list->Pml4Address;
+                    ulong kernPml4 = s_kernelPml4Phys != 0 ? s_kernelPml4Phys : VirtualMemorySpace.Pml4PhysicalAddress;
+                    if (pml4 != 0 && kernPml4 != 0 && pml4 != kernPml4)
+                    {
+                        if (Cpu.ReadCr3() == pml4)
+                        {
+                            Cpu.WriteCr3(kernPml4);
+                        }
+                        VirtualMemorySpace.DestroyAddressSpace(pml4);
+                        list->Pml4Address = 0;
+                    }
                     if (list->KernelStackBase != 0)
                     {
                         ulong phys = Hhdm.VirtualToPhysical(list->KernelStackBase);

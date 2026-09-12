@@ -1,0 +1,66 @@
+# =============================================================================
+# SharpMetal Microkernel (.clineignore)
+# Prevents Cline from reading, searching, or indexing large binary artifacts,
+# build outputs, virtual disk images, and temporary execution logs.
+# =============================================================================
+
+# --- Git & Version Control ---
+.git/
+
+# --- .NET & Native AOT Compilation Outputs ---
+**/bin/
+**/obj/
+*.deps.json
+*.runtimeconfig.json
+*.ilc.rsp
+
+# --- Native Linker & Assembly Outputs ---
+*.obj
+*.o
+*.pdb
+*.exp
+*.lib
+*.map
+
+# --- Pre-compiled & Staged Binaries ---
+*.bin
+*.exe
+*.dll
+
+# --- Disk Images, Ramdisks & Firmware Artifacts ---
+*.img
+*.iso
+*.efi
+*.EFI
+*.fd
+build/disk.img
+build/nvme.img
+build/BOOTX64.EFI
+build/esp/
+build/iso/
+
+# --- VM, Headless CI & Execution Logs ---
+*.log
+qemu.log
+serial.log
+
+# --- IDE & Editor Specific Metadata ---
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.userprefs
+*.sln.docstates
+
+# --- Python Intermediates ---
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# --- OS & Temporary Files ---
+.DS_Store
+Thumbs.db
+*~
+*.swp
+*.swo

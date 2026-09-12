@@ -44,6 +44,9 @@ dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/Userland.Runti
 echo "[BUILD] Compiling Userland.Runtime.Gc..."
 dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" -c Release
 
+echo "[BUILD] Compiling Userland.PieLoader IL..."
+dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release
+
 echo "[BUILD] Compiling roottask IL..."
 dotnet build "${REPO_ROOT}/src/servers/roottask/roottask.csproj" -c Release
 
@@ -407,6 +410,7 @@ echo "[AOT] Compiling shell via Native AOT (ilc)..."
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
     -r "${REPO_ROOT}/src/libs/Microkernel.Drawing/bin/x64/Release/${TFM}/Microkernel.Drawing.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
     -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.obj" \
     --targetos windows \
     --targetarch x64 \

@@ -11,5 +11,7 @@
   <ItemGroup>
     <ProjectReference Include="../../common/MiniCoreLib/MiniCoreLib.csproj" />
     <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+    <ProjectReference Include="../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Vfs/Microkernel.Vfs.csproj" />
   </ItemGroup>
 </Project>

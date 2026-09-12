@@ -19,7 +19,7 @@ namespace Kernel.Memory.Virtual
         public const byte VectorTlbShootdown = 0xFE;
 
         private static TlbShootdownContext s_context;
-        private static TicketSpinLock s_shootdownLock;
+        private static SpinLockWithIrqSave s_shootdownLock;
 
         public static void BroadcastShootdown(ulong pml4Phys, ulong vaddr, ulong pageCount)
         {
@@ -33,14 +33,14 @@ namespace Kernel.Memory.Virtual
                 }
             }
 
-            // 2. Broadcast TLB shootdown to other cores if SMP is active
+            // 2. Broadcast TLB shootdown to other cores if SMP is active.
+            // Phase 2c: IRQ-safe lock — timer ISR (vector 0x20 -> OnTimerTick ->
+            // scheduler) never blocks on this lock; shootdown runs with IF as
+            // captured by SpinLockWithIrqSave and IPIs are NMI-style fixed
+            // vectors, so holding with interrupts disabled cannot self-deadlock.
             if (CpuTopology.ActiveCoreCount > 1)
             {
-                // CRITICAL ARCHITECTURAL RULE:
-                // Never acquire shootdown lock with interrupts disabled (cli) to avoid deadlocks!
-                Cpu.EnableInterrupts();
-
-                s_shootdownLock.Acquire();
+                ulong rflags = s_shootdownLock.Acquire();
                 try
                 {
                     s_context.TargetPml4 = pml4Phys;
@@ -68,7 +68,7 @@ namespace Kernel.Memory.Virtual
                 }
                 finally
                 {
-                    s_shootdownLock.Release();
+                    s_shootdownLock.Release(rflags);
                 }
             }
         }

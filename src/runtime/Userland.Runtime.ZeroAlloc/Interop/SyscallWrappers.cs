@@ -121,5 +121,13 @@ namespace Userland.Runtime.ZeroAlloc.Interop
         {
             return Syscall(SyscallNumbers.SysAllocDma, sizeBytes, virtAddr, 0, 0, 0, 0);
         }
+
+        // Architectural correction #1: Ring3/Ring0 boundary — shell never maps
+        // pages or inserts TCBs. Kernel creates the address space + stacks + TCB.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong Spawn(ulong entryVirt, ulong stackTop)
+        {
+            return Syscall(SyscallNumbers.SysSpawn, entryVirt, stackTop, 0, 0, 0, 0);
+        }
     }
 }

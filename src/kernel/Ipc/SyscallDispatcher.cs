@@ -131,6 +131,57 @@ namespace Kernel.Ipc
                     return newTcb != null ? newTcb->Id : 0;
                 }
 
+                case SyscallNumbers.SysSpawn: // 0x0B: Spawn(entryVirt, stackTop)
+                {
+                    // Architectural correction #1: full Ring-0 synthesis.
+                    // Userland (shell exec) never touches VirtualMemorySpace or
+                    // Scheduler internals. Kernel: (1) clones kernel PML4 high
+                    // half into a fresh address space, (2) maps a 64KB user
+                    // stack at 0x7FFFFFF00000, (3) allocates 16KB kernel stack
+                    // via CreateUserThread (TSS.RSP0), (4) mints root CNode
+                    // caps inheriting the caller, (5) sets RIP/RSP/CS/SS/RFLAGS.
+                    ulong entryRip = a1;
+                    ulong stackTop = a2;
+                    if (entryRip == 0) return 0;
+
+                    const ulong UserStackBase = 0x00007FFFFFF00000UL;
+                    const ulong UserStackSize = 65536;
+                    const ulong DefaultStackTop = 0x00007FFFFFFFF000UL;
+
+                    ulong userPml4Phys = PageFrameAllocator.AllocateFrame();
+                    if (userPml4Phys == 0) return 0;
+                    ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
+                    for (int i = 0; i < 512; i++) userPml4[i] = 0;
+                    ulong* kernPml4 = (ulong*)Hhdm.PhysicalToVirtual(VirtualMemorySpace.Pml4PhysicalAddress);
+                    for (int i = 256; i < 512; i++) userPml4[i] = kernPml4[i];
+
+                    if (stackTop == 0) stackTop = DefaultStackTop;
+                    ulong stackBase = stackTop >= UserStackSize ? (stackTop - UserStackSize) & ~0xFFFUL : UserStackBase;
+                    ulong pages = (UserStackSize + 4095) / 4096;
+                    for (ulong s = 0; s < pages; s++)
+                    {
+                        ulong f = PageFrameAllocator.AllocateFrame();
+                        if (f == 0)
+                        {
+                            VirtualMemorySpace.DestroyAddressSpace(userPml4Phys);
+                            return 0;
+                        }
+                        byte* fv = (byte*)Hhdm.PhysicalToVirtual(f);
+                        for (ulong w = 0; w < 4096 / 8; w++) ((ulong*)fv)[w] = 0;
+                        VirtualMemorySpace.MapUserPage4K(userPml4, (stackBase & ~0xFFFUL) + s * 4096, f, Paging.Present | Paging.Writable | Paging.User);
+                    }
+
+                    ThreadControlBlock* newTcb = Scheduler.CreateUserThread(entryRip, stackTop & ~15UL, 0, userPml4Phys);
+                    if (newTcb == null)
+                    {
+                        VirtualMemorySpace.DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
+                    // Mint root CNode already inherited inside CreateUserThread
+                    // from caller; nothing else to wire for Ring 3 entry.
+                    return newTcb != null ? newTcb->Id : 0;
+                }
+
                 case SyscallNumbers.SysGetPhysicalAddress: // 0x09
                 {
                     ulong virtAddr = a1;

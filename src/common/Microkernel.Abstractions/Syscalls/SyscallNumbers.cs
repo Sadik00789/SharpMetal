@@ -14,6 +14,8 @@ namespace Microkernel.Abstractions.Syscalls
         public const ulong SysCreateProcess= 0x08;
         public const ulong SysGetPhysicalAddress = 0x09;
         public const ulong SysAllocDma      = 0x0A;
+        public const ulong SysSpawn         = 0x0B;
+        public const ulong Spawn            = SysSpawn;
 
         // Phase 5 IPC primitives
         public const ulong SysSend    = 0x10;

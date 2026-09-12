@@ -85,6 +85,10 @@ namespace Kernel.Arch.x86_64.Hardware
     public static unsafe class InterruptDispatcher
     {
         public static volatile int TimerTicks = 0;
+        // Phase 2c: panic path never acquires this with IF=1 while holding the
+        // scheduler lock; ISR context uses try-acquire semantics via ticket order.
+        // Kept as raw ticket lock only for fault re-entry serialization (never
+        // taken from timer ISR while scheduler lock is held).
         private static Concurrency.TicketSpinLock s_panicLock;
 
         public static VectorNotificationTable VectorNotifications;

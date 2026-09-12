@@ -9,6 +9,9 @@ namespace Kernel.Arch.x86_64.Hardware
         private static uint* s_apic;
         public static volatile bool IsInitialized = false;
 
+        public const uint QuantumMs = 10;
+        public static uint TicksPerMs = 0;
+
         public static void Initialize()
         {
             // Access APIC via HHDM mapping
@@ -21,6 +24,16 @@ namespace Kernel.Arch.x86_64.Hardware
             // 2. Task Priority Register (0x080): Allow all interrupt priorities
             WriteRegister(0x080, 0x00);
 
+            InitializeTimer(QuantumMs);
+
+            IsInitialized = true;
+        }
+
+        // Phase 3: calibrate APIC timer against 8254 PIT channel 0.
+        // Divide-by-16, 10ms window with divisor 11932 @1.193182MHz,
+        // ticksPerMs = elapsed/10, periodic vector 32 = ticksPerMs*QuantumMs.
+        public static void InitializeTimer(uint quantumMs = QuantumMs)
+        {
             // 3. Divide Configuration Register (0x3E0): Value 0x03 = Divide by 16
             WriteRegister(0x3E0, 0x03);
 
@@ -28,10 +41,55 @@ namespace Kernel.Arch.x86_64.Hardware
             // Bit 17 = 1 (Periodic Mode), Bit 16 = 0 (Unmasked), Vector = 0x20
             WriteRegister(0x320, 0x00020020);
 
-            // 5. Initial Count Register (0x380): Fast deterministic periodic ticks in QEMU
-            WriteRegister(0x380, 0x100000);
+            uint ticksPerMs = CalibrateWithPit10Ms();
+            if (ticksPerMs == 0)
+            {
+                // Fallback: legacy fixed rate (QEMU TCG deterministic).
+                WriteRegister(0x380, 0x100000);
+                return;
+            }
 
-            IsInitialized = true;
+            TicksPerMs = ticksPerMs;
+            uint init = ticksPerMs * (quantumMs == 0 ? QuantumMs : quantumMs);
+            if (init == 0) init = ticksPerMs * QuantumMs;
+            WriteRegister(0x380, init);
+        }
+
+        private static uint CalibrateWithPit10Ms()
+        {
+            // Program PIT channel 0, mode 2 (rate generator), binary, divisor 11932 (~10ms).
+            PortIo.Out8(0x43, 0x34);
+            PortIo.Out8(0x40, (byte)(11932 & 0xFF));
+            PortIo.Out8(0x40, (byte)((11932 >> 8) & 0xFF));
+
+            // Start APIC one-shot countdown from max.
+            WriteRegister(0x320, 0x00000020); // one-shot, vector 32, unmasked
+            WriteRegister(0x380, 0xFFFFFFFF);
+
+            // Wait for PIT wraparound: latch + read channel-0 counter twice per
+            // poll, exit when counter wraps (newCount > prevCount in down-counter).
+            // Avoids multi-byte latch jitter by comparing latched 16-bit snapshots.
+            PortIo.Out8(0x43, 0x00);
+            ushort prev = (ushort)(PortIo.In8(0x40) | (PortIo.In8(0x40) << 8));
+            ulong spin = 10000000;
+            bool wrapped = false;
+            while (spin-- > 0)
+            {
+                PortIo.Out8(0x43, 0x00);
+                ushort cur = (ushort)(PortIo.In8(0x40) | (PortIo.In8(0x40) << 8));
+                if (cur > prev)
+                {
+                    wrapped = true;
+                    break;
+                }
+                prev = cur;
+            }
+            if (!wrapped) return 0;
+
+            uint curr = ReadRegister(0x390);
+            uint elapsed = 0xFFFFFFFF - curr;
+            uint perMs = elapsed / 10;
+            return perMs;
         }
 
         public static void InitializeAp()

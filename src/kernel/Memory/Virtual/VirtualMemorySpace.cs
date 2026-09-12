@@ -350,6 +350,112 @@ namespace Kernel.Memory.Virtual
             SmpTlbShootdown.BroadcastShootdown(pml4Phys, vaddr, 1);
         }
 
+        // Phase 1: Iteratively reclaim user half (PML4 0..255) of an address space.
+        // Skips kernel half (256..511: HHDM + kernel text). Guards every free
+        // with PageFrameAllocator.IsRam so MMIO (GOP framebuffer, PCI BARs mapped
+        // via MapUserMmio) is never returned to the PMM bitmap.
+        public static unsafe void DestroyAddressSpace(ulong pml4Phys)
+        {
+            if (pml4Phys == 0) return;
+            ulong* pml4 = (ulong*)Hhdm.PhysicalToVirtual(pml4Phys & ~0xFFFUL);
+
+            for (ulong pml4Idx = 0; pml4Idx < 256; pml4Idx++)
+            {
+                ulong pml4e = pml4[pml4Idx];
+                if ((pml4e & Paging.Present) == 0) continue;
+
+                ulong pdptPhys = pml4e & Paging.AddressMask;
+                if (!PageFrameAllocator.IsRam(pdptPhys))
+                {
+                    pml4[pml4Idx] = 0;
+                    continue;
+                }
+                ulong* pdpt = (ulong*)Hhdm.PhysicalToVirtual(pdptPhys);
+
+                for (ulong pdptIdx = 0; pdptIdx < 512; pdptIdx++)
+                {
+                    ulong pdpte = pdpt[pdptIdx];
+                    if ((pdpte & Paging.Present) == 0) continue;
+
+                    if ((pdpte & Paging.LargePage) != 0)
+                    {
+                        // 1GB page: free 262144 contiguous 4K frames if managed RAM.
+                        ulong base1G = pdpte & Paging.AddressMask;
+                        if (PageFrameAllocator.IsRam(base1G))
+                        {
+                            PageFrameAllocator.FreeContiguousFrames(base1G, 262144);
+                        }
+                        pdpt[pdptIdx] = 0;
+                        continue;
+                    }
+
+                    ulong pdPhys = pdpte & Paging.AddressMask;
+                    if (!PageFrameAllocator.IsRam(pdPhys))
+                    {
+                        pdpt[pdptIdx] = 0;
+                        continue;
+                    }
+                    ulong* pd = (ulong*)Hhdm.PhysicalToVirtual(pdPhys);
+
+                    for (ulong pdIdx = 0; pdIdx < 512; pdIdx++)
+                    {
+                        ulong pde = pd[pdIdx];
+                        if ((pde & Paging.Present) == 0) continue;
+
+                        if ((pde & Paging.LargePage) != 0)
+                        {
+                            // 2MB page: free 512 contiguous frames if managed RAM.
+                            ulong base2M = pde & Paging.AddressMask;
+                            if (PageFrameAllocator.IsRam(base2M))
+                            {
+                                PageFrameAllocator.FreeContiguousFrames(base2M, 512);
+                            }
+                            pd[pdIdx] = 0;
+                            continue;
+                        }
+
+                        ulong ptPhys = pde & Paging.AddressMask;
+                        if (!PageFrameAllocator.IsRam(ptPhys))
+                        {
+                            pd[pdIdx] = 0;
+                            continue;
+                        }
+                        ulong* pt = (ulong*)Hhdm.PhysicalToVirtual(ptPhys);
+
+                        for (ulong ptIdx = 0; ptIdx < 512; ptIdx++)
+                        {
+                            ulong pte = pt[ptIdx];
+                            if ((pte & Paging.Present) == 0) continue;
+                            ulong framePhys = pte & Paging.AddressMask;
+                            if (PageFrameAllocator.IsRam(framePhys))
+                            {
+                                PageFrameAllocator.FreeFrame(framePhys);
+                            }
+                            pt[ptIdx] = 0;
+                        }
+
+                        // Free the PT frame itself.
+                        PageFrameAllocator.FreeFrame(ptPhys);
+                        pd[pdIdx] = 0;
+                    }
+
+                    // Free the PD frame.
+                    PageFrameAllocator.FreeFrame(pdPhys);
+                    pdpt[pdptIdx] = 0;
+                }
+
+                // Free the PDPT frame.
+                PageFrameAllocator.FreeFrame(pdptPhys);
+                pml4[pml4Idx] = 0;
+            }
+
+            // Finally free the PML4 frame itself (caller must have switched CR3 away).
+            if (PageFrameAllocator.IsRam(pml4Phys & ~0xFFFUL))
+            {
+                PageFrameAllocator.FreeFrame(pml4Phys & ~0xFFFUL);
+            }
+        }
+
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
         public static void InvalidatePage(ulong virtAddr)
         {

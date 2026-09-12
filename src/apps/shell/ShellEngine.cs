@@ -1,5 +1,6 @@
 using System;
 using Microkernel.Abstractions.Services;
+using Userland.PieLoader;
 using Userland.Runtime.ZeroAlloc.Interop;
 
 namespace Shell
@@ -52,6 +53,7 @@ namespace Shell
                 grid.WriteString("  nvme         - Run NVMe block read/write benchmark\n");
                 grid.WriteString("  net          - Run VirtIO-Net network benchmark\n");
                 grid.WriteString("  cat <file>   - Read and display file from FAT32 volume\n");
+                grid.WriteString("  exec <path>  - Load PIE binary from FAT32 and spawn Ring 3 process\n");
                 grid.WriteString("  echo <text>  - Print text to terminal\n");
                 grid.WriteString("  exit         - Power off microkernel\n");
                 grid.WriteString("  poweroff     - Power off microkernel\n");
@@ -126,6 +128,73 @@ namespace Shell
                 grid.WriteString("[VFS] Contents of /HELLO.TXT:\n  ");
                 grid.WriteString(text);
                 grid.WriteString("\n");
+            }
+            else if (StartsWithCommand(buf, len, "exec "))
+            {
+                // Phase 4: parse path after "exec ", stage PIE via VFS, spawn via Ring-0.
+                int ps = 5;
+                while (ps < len && (buf[ps] == (byte)' ' || buf[ps] == (byte)'\t')) ps++;
+                int pe = len;
+                while (pe > ps && (buf[pe - 1] == (byte)' ' || buf[pe - 1] == (byte)'\t')) pe--;
+                int plen = pe - ps;
+                if (plen <= 0 || plen > 128)
+                {
+                    grid.WriteString("Usage: exec <path>\n");
+                }
+                else
+                {
+                    // Freestanding MiniCoreLib has no string(char[]) ctors:
+                    // match the four known FAT32 payload names explicitly.
+                    string vfsPath = null;
+                    if (plen == 10 && buf[ps] == (byte)'/' &&
+                        buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
+                        buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
+                        buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
+                        buf[ps+7] == (byte)'T' && buf[ps+8] == (byte)'X' &&
+                        buf[ps+9] == (byte)'T')
+                    {
+                        vfsPath = "/HELLO.TXT";
+                    }
+                    else if (plen == 9 && buf[ps] == (byte)'/' &&
+                        buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
+                        buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
+                        buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
+                        buf[ps+7] == (byte)'B' && buf[ps+8] == (byte)'I' )
+                    {
+                        vfsPath = "/HELLO.BIN";
+                    }
+                    if (vfsPath == null)
+                    {
+                        grid.WriteString("Usage: exec /HELLO.TXT | /HELLO.BIN\n");
+                        SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> bad path.\n");
+                    }
+                    else
+                    {
+
+                    const ulong targetBase = 0x0000000050000000UL;
+                    const ulong stackTop = 0x00007FFFFFFFF000UL;
+                    // Pre-map staging window for the loader copy.
+                    SyscallWrappers.AllocDma(4UL * 1024 * 1024, targetBase);
+                    ulong entry = PieRelocator.LoadAndRelocateFromVfs(vfsPath, targetBase);
+                    if (entry == 0)
+                    {
+                        grid.WriteString("[EXEC] Failed to load PIE image.\n");
+                    }
+                    else
+                    {
+                        ulong tid = SyscallWrappers.Spawn(entry, stackTop);
+                        if (tid == 0)
+                        {
+                            grid.WriteString("[EXEC] Spawn failed in Ring 0.\n");
+                        }
+                        else
+                        {
+                            grid.WriteString("[EXEC] Spawned Ring 3 process.\n");
+                        }
+                    }
+                    }
+                }
+                SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> FAT32 PIE spawn.\n");
             }
             else if (MatchCommand(buf, len, "net"))
             {

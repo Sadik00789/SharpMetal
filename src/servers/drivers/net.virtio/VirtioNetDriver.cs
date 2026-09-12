@@ -251,11 +251,15 @@ namespace NetVirtio
             *(ushort*)(s_txRingVirt + 12) = 0;            // flags = 0
             *(ushort*)(s_txRingVirt + 14) = 0;            // next = 0
 
-            // 3. Put index 0 into avail_ring[avail_idx % 16]
+            // 3. Put descriptor into avail_ring slot (VirtIO 16-bit wraparound):
+            // avail->idx / used->idx are 16-bit circular counters; mask the
+            // slot and wrap the counter with explicit ushort arithmetic.
+            const int TxRingSize = 16;
             ushort availIdx = *(ushort*)(s_txRingVirt + 0x802);
-            *(ushort*)(s_txRingVirt + 0x804 + ((availIdx % 16) * 2)) = 0;
+            ushort slot = (ushort)(availIdx & (TxRingSize - 1));
+            *(ushort*)(s_txRingVirt + 0x804 + (slot * 2)) = 0;
 
-            // 4. Memory barrier, then increment avail_idx
+            // 4. Descriptor-visibility barrier BEFORE publishing the new index.
             System.Threading.Thread.MemoryBarrier();
             *(ushort*)(s_txRingVirt + 0x802) = (ushort)(availIdx + 1);
 
@@ -276,12 +280,12 @@ namespace NetVirtio
                 *(ushort*)NotifyCfg = 1;
             }
 
-            // 6. Poll used_idx with bounded timeout to confirm hardware transmission
+            // 6. Poll used_idx with bounded timeout (16-bit wraparound-safe delta).
             int timeout = 100000;
             while (timeout-- > 0)
             {
                 ushort usedIdx = *(ushort*)(s_txRingVirt + 0xC02);
-                if (usedIdx != s_lastUsedIdx)
+                if ((ushort)(usedIdx - s_lastUsedIdx) != 0)
                 {
                     s_lastUsedIdx = usedIdx;
                     break;

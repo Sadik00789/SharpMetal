@@ -11,10 +11,24 @@ namespace Kernel.Memory.Physical
         private static ulong _totalFrames;
         private static ulong _freeFrames;
         private static ulong _lastFoundIndex;
+        private static ulong s_maxUsablePhys;
 
         public static ulong TotalFrames => _totalFrames;
         public static ulong FreeFrames => _freeFrames;
         public static ulong UsedFrames => _totalFrames - _freeFrames;
+
+        public static bool IsRam(ulong phys)
+        {
+            // Architectural correction #2: never treat GOP framebuffer or PCI
+            // MMIO mapped via MapUserMmio as managed RAM. PMM bitmap covers
+            // [0, _totalFrames*4096); usable RAM is [0x100000, s_maxUsablePhys)
+            // (MarkRangeFree tracks the high-water mark). Reject low memory
+            // (IVT/BDA/EBDA/trampoline) and anything at/above the managed top.
+            if (phys < 0x100000UL) return false;
+            if (s_maxUsablePhys != 0 && phys >= s_maxUsablePhys) return false;
+            if (phys >= (_totalFrames * PageSize)) return false;
+            return true;
+        }
 
         public static void Initialize(ulong* bitmapMemory, ulong totalFrames)
         {
@@ -53,6 +67,9 @@ namespace Kernel.Memory.Physical
                         _freeFrames++;
                     }
                 }
+
+                ulong endPhys = startPhys + frameCount * PageSize;
+                if (endPhys > s_maxUsablePhys) s_maxUsablePhys = endPhys;
             }
             finally
             {
