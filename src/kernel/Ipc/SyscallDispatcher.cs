@@ -74,9 +74,12 @@ namespace Kernel.Ipc
                     ulong virtAddr = a2;
                     ulong sizeBytes = a3;
                     bool writeCombining = a4 != 0;
+                    // Hardened: reject degenerate requests before touching page tables.
+                    if (sizeBytes == 0 || virtAddr == 0) return ~0UL;
+                    if (sizeBytes > 256UL * 1024 * 1024) return ~0UL;
                     ulong userPml4 = (current != null && current->Pml4Address != 0) ? current->Pml4Address : Cpu.ReadCr3();
-                    VirtualMemorySpace.MapUserMmio(userPml4, physAddr, virtAddr, sizeBytes, writeCombining);
-                    return 0;
+                    bool ok = VirtualMemorySpace.MapUserMmio(userPml4, physAddr, virtAddr, sizeBytes, writeCombining);
+                    return ok ? 0 : ~0UL;
                 }
 
                 case SyscallNumbers.SysGetBootInfo: // 0x07
@@ -193,12 +196,25 @@ namespace Kernel.Ipc
                 {
                     ulong sizeBytes = a1;
                     ulong virtAddr = a2;
+                    // Hardened: strict DMA-zone confinement via DmaArenaAllocator
+                    // (MinAddress/MaxAddress, overflow, zero-size rejection).
+                    if (sizeBytes == 0) return 0;
+                    if (sizeBytes > 256UL * 1024 * 1024) return 0;
+                    if (virtAddr != 0)
+                    {
+                        if (virtAddr >= Kernel.Memory.Virtual.Hhdm.Base) return 0;
+                        if (sizeBytes > 0xFFFFFFFFFFFFFFFFUL - virtAddr) return 0;
+                    }
                     ulong phys = DmaArenaAllocator.Allocate(sizeBytes, 4096);
                     if (phys == 0) return 0;
+                    // Post-allocation confinement proof: allocated range must be
+                    // wholly inside [MinAddress, MaxAddress).
+                    if (!DmaArenaAllocator.ValidateRange(phys, sizeBytes)) return 0;
                     if (virtAddr != 0)
                     {
                         ulong userPml4 = (current != null && current->Pml4Address != 0) ? current->Pml4Address : Cpu.ReadCr3();
-                        VirtualMemorySpace.MapUserMmio(userPml4, phys, virtAddr, sizeBytes, writeCombining: false);
+                        bool ok = VirtualMemorySpace.MapUserMmio(userPml4, phys, virtAddr, sizeBytes, writeCombining: false);
+                        if (!ok) return 0;
                     }
                     return phys;
                 }

@@ -1,3 +1,10 @@
+; AUDIT HARDENING (v1.0.2): Syscall / Fastpath Register Preservation
+; All Win64 + SysV callee-saved registers (rbx, rbp, r12, r13, r14, r15)
+; plus rdi/rsi payload regs are explicitly spilled on entry and restored
+; verbatim before sysretq, so Native AOT register-state assumptions survive
+; Ring 0 <-> Ring 3 roundtrips. RCX/R11 are RESERVED for sysretq (HW-saved
+; RIP/RFLAGS) and never carry IPC payload. Interrupts are masked (cli)
+; before the restore path to close the preemption window.
 default rel
 section .text
 
@@ -36,7 +43,9 @@ SyscallEntry:
     push r8               ; user r8 payload reg
     push r9               ; user r9 payload reg
 
-    ; 4. Preserve callee-saved registers
+    ; 4. Preserve ALL callee-saved registers (Win64 non-volatile set):
+    ; rbx, rbp, r12-r15 + rdi/rsi (AOT codegen spills these; clobbering
+    ; them across Ring 0<->Ring 3 would corrupt caller frames).
     push rbx
     push rbp
     push r12
@@ -76,7 +85,8 @@ SyscallEntry:
 
     add rsp, 72
 
-    ; 5. Restore callee-saved + user payload registers (NOT RCX/R11 yet)
+    ; 5. Restore callee-saved + user payload registers in exact reverse
+    ; order (NOT RCX/R11 yet - those are sysretq-reserved).
     pop rsi
     pop rdi
     pop r15

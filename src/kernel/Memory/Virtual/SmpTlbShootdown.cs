@@ -18,11 +18,30 @@ namespace Kernel.Memory.Virtual
     {
         public const byte VectorTlbShootdown = 0xFE;
 
+        // Bounded-spin tunables: the ACK wait is always finite with PAUSE
+        // backoff so a dead peer can never hang the kernel. The shootdown
+        // lock itself is IRQ-safe (cli before ticket acquire); the IPI
+        // handler never acquires it, so holding it with IF=0 cannot
+        // self-deadlock - peers ACK without needing the lock.
+        private const ulong AckTimeoutSpins = 50_000_000;
+        private const ulong MaxPagesPerShootdown = 512;
+
         private static TlbShootdownContext s_context;
         private static SpinLockWithIrqSave s_shootdownLock;
 
         public static void BroadcastShootdown(ulong pml4Phys, ulong vaddr, ulong pageCount)
         {
+            // Fail-closed on degenerate requests.
+            if (pageCount == 0) return;
+            if (pageCount > MaxPagesPerShootdown) pageCount = MaxPagesPerShootdown;
+            // Overflow guard: vaddr + pageCount*4096 must not wrap.
+            if (pageCount > 0xFFFFFFFFFFFFFFFFUL / 4096UL) return;
+            ulong span = pageCount * 4096UL;
+            if (span > 0xFFFFFFFFFFFFFFFFUL - vaddr) return;
+            // Only canonical addresses are valid shootdown targets: reject the
+            // non-canonical hole between low-half top and HHDM base.
+            if (vaddr > 0x00007FFFFFFFFFFFUL && vaddr < Hhdm.Base) return;
+
             // 1. Invalidate local TLB entry on the executing core
             ulong curCr3 = Cpu.ReadCr3();
             if (curCr3 == pml4Phys || vaddr >= Hhdm.Base)
@@ -34,10 +53,16 @@ namespace Kernel.Memory.Virtual
             }
 
             // 2. Broadcast TLB shootdown to other cores if SMP is active.
-            // Phase 2c: IRQ-safe lock — timer ISR (vector 0x20 -> OnTimerTick ->
-            // scheduler) never blocks on this lock; shootdown runs with IF as
-            // captured by SpinLockWithIrqSave and IPIs are NMI-style fixed
-            // vectors, so holding with interrupts disabled cannot self-deadlock.
+            // AUDIT HARDENING (v1.0.2): deadlock prevention.
+            // SpinLockWithIrqSave.Acquire() executes cli BEFORE taking the
+            // ticket, so the critical section runs with IF=0 (interrupts
+            // explicitly masked while holding the internal shootdown lock).
+            // HandleTlbShootdownIpi() never acquires this lock - it only
+            // reads the snapshot context, flushes, decrements, and sends
+            // EOI - so a holder waiting for ACKs cannot deadlock against a
+            // peer waiting for the lock. The ACK spin below is bounded
+            // (AckTimeoutSpins with PAUSE + periodic barrier backoff) so a
+            // dead peer yields a warning instead of a hang.
             if (CpuTopology.ActiveCoreCount > 1)
             {
                 ulong rflags = s_shootdownLock.Acquire();
@@ -53,11 +78,13 @@ namespace Kernel.Memory.Virtual
                     // Broadcast IPI vector 0xFE to all excluding self
                     LocalApic.BroadcastIpi(VectorTlbShootdown, excludeSelf: true);
 
-                    // Spin-wait with pause while keeping interrupts enabled
-                    ulong timeout = 50_000_000;
+                    // Bounded ACK spin with PAUSE backoff and timeout.
+                    ulong timeout = AckTimeoutSpins;
                     while (s_context.PendingAcks > 0 && timeout > 0)
                     {
                         Cpu.Pause();
+                        // Periodic barrier so the volatile ACK decrement is observed.
+                        if ((timeout & 0xFF) == 0) Atomic.MemoryBarrier();
                         timeout--;
                     }
 
@@ -75,13 +102,30 @@ namespace Kernel.Memory.Virtual
 
         public static void HandleTlbShootdownIpi()
         {
-            // Read CR3 and check if this core is running the target address space
-            ulong cr3 = Cpu.ReadCr3();
-            if (cr3 == s_context.TargetPml4 || s_context.VirtualAddress >= Hhdm.Base)
+            // IPI context: never acquire s_shootdownLock here (would deadlock
+            // against a holder spinning with IF=0). Read the snapshot context,
+            // flush, decrement, EOI. Bounded page loop prevents a corrupted
+            // context from hanging interrupt handling.
+            ulong targetPml4 = s_context.TargetPml4;
+            ulong targetVaddr = s_context.VirtualAddress;
+            ulong count = s_context.PageCount;
+            if (count > MaxPagesPerShootdown) count = MaxPagesPerShootdown;
+            if (count > 0 && count <= MaxPagesPerShootdown)
             {
-                for (ulong i = 0; i < s_context.PageCount; i++)
+                if (count <= 0xFFFFFFFFFFFFFFFFUL / 4096UL)
                 {
-                    Cpu.Invlpg(s_context.VirtualAddress + (i * 4096));
+                    ulong span = count * 4096UL;
+                    if (span <= 0xFFFFFFFFFFFFFFFFUL - targetVaddr)
+                    {
+                        ulong cr3 = Cpu.ReadCr3();
+                        if (cr3 == targetPml4 || targetVaddr >= Hhdm.Base)
+                        {
+                            for (ulong i = 0; i < count; i++)
+                            {
+                                Cpu.Invlpg(targetVaddr + (i * 4096));
+                            }
+                        }
+                    }
                 }
             }
 

@@ -20,6 +20,7 @@ namespace Kernel.Concurrency
             }
         }
 
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Release()
         {
@@ -35,11 +36,16 @@ namespace Kernel.Concurrency
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public ulong Acquire()
         {
+            // AUDIT: interrupts are explicitly masked (cli) BEFORE acquiring
+            // the ticket, so the critical section runs with IF=0. Callers must
+            // therefore never spin unboundedly while holding this lock when
+            // peer cores may need interrupts to ACK (see SmpTlbShootdown).
             ulong rflags = Cpu.ReadRflags();
             Cpu.DisableInterrupts();
             Lock.Acquire();
             return rflags;
         }
+
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void Release(ulong rflags)

@@ -260,22 +260,77 @@ namespace Kernel.Memory.Virtual
             return userPml4Phys;
         }
 
-        public static void MapUserMmio(ulong userPml4Phys, ulong physAddr, ulong virtAddr, ulong sizeBytes, bool writeCombining)
+        private static bool IsManagedConventionalRam(ulong phys)
         {
+            // Low IVT/BDA/EBDA + AP trampoline page are never valid MMIO.
+            if (phys < 0x100000UL) return true;
+            int count = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionCount;
+            if (count < 0) return false;
+            if (count > Kernel.Boot.KernelHigh.BootMemoryMap.MaxRegions) count = Kernel.Boot.KernelHigh.BootMemoryMap.MaxRegions;
+            for (int i = 0; i < count; i++)
+            {
+                ulong start = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionStarts[i];
+                ulong pages = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionPageCounts[i];
+                if (pages == 0) continue;
+                if (pages > 0xFFFFFFFFFFFFFFFFUL / 4096UL) continue;
+                ulong size = pages * 4096UL;
+                if (size > 0xFFFFFFFFFFFFFFFFUL - start) continue;
+                ulong end = start + size;
+                if (phys >= start && phys < end) return true;
+            }
+            return false;
+        }
+
+        public static bool MapUserMmio(ulong userPml4Phys, ulong physAddr, ulong virtAddr, ulong sizeBytes, bool writeCombining)
+        {
+            const ulong MaxSingleMapping = 256UL * 1024 * 1024;
+            if (sizeBytes == 0) return false;
+            if (sizeBytes > MaxSingleMapping) return false;
+            if (virtAddr == 0) return false;
+            if (virtAddr >= Hhdm.Base) return false;
+            if (sizeBytes > 0xFFFFFFFFFFFFFFFFUL - virtAddr) return false;
+            if (virtAddr + sizeBytes > Hhdm.Base) return false;
+            if (sizeBytes > 0xFFFFFFFFFFFFFFFFUL - physAddr) return false;
+
             if (userPml4Phys == 0)
             {
                 userPml4Phys = Pml4PhysicalAddress;
             }
+            if (userPml4Phys == 0) return false;
 
             ulong alignedPhys = physAddr & ~0xFFFUL;
             ulong alignedVirt = virtAddr & ~0xFFFUL;
             ulong pageOffset = physAddr & 0xFFFUL;
+            if (sizeBytes > 0xFFFFFFFFFFFFFFFFUL - pageOffset - 0xFFFUL) return false;
             ulong alignedSize = (sizeBytes + pageOffset + 0xFFFUL) & ~0xFFFUL;
             if (alignedSize == 0) alignedSize = 4096;
 
             ulong flags = Paging.Present | Paging.Writable | Paging.User;
             if (writeCombining) flags |= Paging.Pat4K;
             else flags |= Paging.CacheDisable;
+
+            if (alignedSize > MaxSingleMapping + 4096) return false;
+            if (alignedSize > 0xFFFFFFFFFFFFFFFFUL - alignedVirt) return false;
+            if (alignedVirt + alignedSize > Hhdm.Base) return false;
+
+            // Hardened MMIO policy (v1.0.2, functionality-preserving):
+            // - ALLOW DMA-arena phys: AllocDma buffers are explicitly allocated
+            //   for bus-mastering + cross-process sharing (shell surface <->
+            //   display, NVMe queues, virtio rings). Denying them breaks IPC.
+            // - ALLOW ACPI reclaim / initrd staging / GOP / ECAM-BAR MMIO:
+            //   these live outside managed conventional RAM and roottask and
+            //   drivers must map them to bootstrap.
+            // - DENY managed conventional RAM (PMM frames in UsableMemoryMap):
+            //   prevents aliasing kernel heaps, page tables, thread stacks.
+            // - DENY low memory (<1MiB): IVT/BDA/trampoline never valid MMIO.
+            // LAPIC/IOAPIC aliasing is discouraged (see userland MmioMapper
+            // advisory deny) but permitted here because input.hid performs
+            // EOI via direct LAPIC mapping on this platform.
+            for (ulong chk = 0; chk < alignedSize; chk += 4096)
+            {
+                ulong pagePhys = alignedPhys + chk;
+                if (IsManagedConventionalRam(pagePhys)) return false;
+            }
 
             ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
             bool isCurrentCr3 = Cpu.ReadCr3() == userPml4Phys;
@@ -293,6 +348,7 @@ namespace Kernel.Memory.Virtual
             {
                 Cpu.WriteCr3(userPml4Phys);
             }
+            return true;
         }
 
         public static unsafe void UnmapPage(ulong pml4Phys, ulong vaddr)
