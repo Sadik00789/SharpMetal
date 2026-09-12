@@ -401,6 +401,9 @@ lld-link \
 cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin"
 
+echo "[BUILD] Userland.PieLoader (pre-shell AOT guard)..."
+dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release --nologo -v q
+
 echo "[AOT] Compiling shell via Native AOT (ilc)..."
 "$ILC" \
     "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.dll" \
