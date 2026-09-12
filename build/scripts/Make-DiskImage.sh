@@ -403,6 +403,12 @@ cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
 
 echo "[BUILD] Userland.PieLoader (pre-shell AOT guard)..."
 dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release --nologo -v q
+# Canonicalize: bare `dotnet build` emits bin/Release/<TFM>/, while x64-platform
+# builds emit bin/x64/Release/<TFM>/. Shell ilc -r below uses the flat path,
+# so mirror the fresh x64 DLL there to avoid stale/missing reference warnings.
+mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}"
+cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
+      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
 
 echo "[AOT] Compiling shell via Native AOT (ilc)..."
 "$ILC" \
