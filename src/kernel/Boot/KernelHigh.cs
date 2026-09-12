@@ -578,6 +578,12 @@ namespace Kernel.Boot
                 // Slot 2: roottask TCB Capability (Read | Write | Call)
                 rootCNode->Set(2, roottaskTcb, CapabilityType.ThreadControl, CapabilityRights.Read | CapabilityRights.Write | CapabilityRights.Call);
 
+                // First Ring 3 thread enters via iretq, never via ThreadEntryPointRunner:
+                // record the user stack top; keep EntryPoint null so a user VA is never
+                // accidentally invoked as a kernel-mode delegate. CurrentRsp still points
+                // at the kernel synthetic stack but is never switched to (iretq never returns).
+                roottaskTcb->UserRsp = userStackTop;
+
                 Scheduler.CurrentThread = roottaskTcb;
                 roottaskTcb->State = ThreadState.Running;
                 TaskStateSegment.SetRsp0(roottaskTcb->KernelStackTop);
@@ -585,8 +591,29 @@ namespace Kernel.Boot
                 // 5. Jump to Ring 3 via iretq
                 EarlySerial.WriteLine("[TRANSITION] Dropping to Ring 3 (CPL = 3) via iretq...");
 
-                // Constraint 1: Jump to actual .text entry RVA (0x40001000)
-                ulong entryRip = 0x0000000040001000UL;
+                // Flat-binary fallback entry (RoottaskEntry.asm .text at base + 0x1000).
+                const ulong RoottaskEntryPoint = 0x0000000040001000UL;
+                const ulong RoottaskImageBase = 0x0000000040000000UL;
+                ulong entryRip = RoottaskEntryPoint;
+                if (roottaskSize > 0x40 && roottaskPayload[0] == 0x4D && roottaskPayload[1] == 0x5A)
+                {
+                    uint e_lfanew = *(uint*)(roottaskPayload + 0x3C);
+                    if (e_lfanew + 40 < roottaskSize && *(uint*)(roottaskPayload + e_lfanew) == 0x00004550)
+                    {
+                        uint entryRva = *(uint*)(roottaskPayload + e_lfanew + 24 + 16);
+                        entryRip = RoottaskImageBase + entryRva;
+                    }
+                }
+                if (entryRip >= Hhdm.Base || (userStackTop & 15UL) != 0 || userStackTop >= Hhdm.Base || userStackTop == 0)
+                {
+                    EarlySerial.Write("[FAULT] Invalid Ring 3 target: RIP=");
+                    EarlySerial.WriteHex(entryRip);
+                    EarlySerial.Write(" RSP=");
+                    EarlySerial.WriteHex(userStackTop);
+                    EarlySerial.WriteLine("");
+                    PortIo.Out8(0xF4, 0x01);
+                    return;
+                }
                 Cpu.EnterUserMode(entryRip, userStackTop, userPml4Phys);
             }
         }
