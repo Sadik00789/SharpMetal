@@ -1,5 +1,5 @@
-; AUDIT HARDENING (v1.0.2): Ring 0 -> Ring 3 Register Hygiene
-; EnterUserMode / UserThreadTrampoline never return to the kernel caller
+; AUDIT HARDENING (v1.1.0): Ring 0 -> Ring 3 Register Hygiene & Strict System V ABI
+; DropToUser / EnterUserMode / UserThreadTrampoline never return to the kernel caller
 ; (iretq drops CPL 0->3), so callee-saved regs need no restore - but they
 ; MUST NOT leak kernel contents to userland. All non-argument volatile and
 ; callee-saved GPRs are explicitly zeroed before iretq. Segment registers
@@ -7,39 +7,57 @@
 default rel
 section .text
 
+global DropToUser
 global EnterUserMode
 global UserThreadTrampoline
 global GetUserThreadTrampoline
 
 ; -----------------------------------------------------------------------------
-; void EnterUserMode(ulong entryRip, ulong userRsp, ulong pml4Phys)
+; void DropToUser(ulong userRip, ulong userRsp, ulong cr3)
 ; Enters Ring 3 (CPL = 3) deterministically via iretq.
-; Input (Microsoft x64 ABI):
-; rcx = entryRip (e.g. 0x40001000)
-; rdx = userRsp (16-byte aligned)
-; r8  = pml4Phys
+; Enforces strict System V AMD64 ABI:
+;   RDI = Target Userland Entry Point (User RIP)
+;   RSI = Target Userland Stack Pointer (User RSP)
+;   RDX = Target Address Space PML4/CR3 (if switching page tables)
 ; -----------------------------------------------------------------------------
-EnterUserMode:
-    ; 1. Load CR3 with user process PML4 (which mirrors kernel high-half)
-    mov cr3, r8
+DropToUser:
+    ; 1. If switching page tables:
+    test rdx, rdx
+    jz .skip_cr3
+    mov cr3, rdx
+.skip_cr3:
 
-    ; 2. Load User Data segment selector (0x18 | 3 = 0x1B) into data segment registers
+    ; 2. Disable interrupts during transition setup
+    cli
+
+    ; 3. Reload data segment registers with User DS (0x18 | 3 = 0x1B)
     mov ax, 0x1B
     mov ds, ax
     mov es, ax
     mov fs, ax
     ; Do not write to gs: writing to gs resets IA32_GS_BASE to 0!
 
-    ; 3. Scrub kernel register state before exposing Ring 3 context.
-    ; rcx/rdx/r8 hold entry args (consumed below); everything else that
-    ; could leak kernel data (rax, rbx, rbp, rsi, rdi, r9-r15) is zeroed.
-    ; Callee-saved set (rbx, rbp, r12-r15) is therefore never leaked and
-    ; AOT caller frames cannot observe stale kernel values in userland.
+    ; 4. Build the 5-QWORD iretq stack frame in exact architectural order:
+    ; [rsp + 32] = User SS:   0x1B (User Data Selector 0x18 | 3)
+    ; [rsp + 24] = User RSP:  rsi (User Stack Top from RSI)
+    ; [rsp + 16] = RFLAGS:    0x3202 (IF = 1 enabled, IOPL = 3)
+    ; [rsp + 8]  = User CS:   0x23 (User Code Selector 0x20 | 3)
+    ; [rsp + 0]  = User RIP:  rdi (User Entry Point from RDI)
+    push qword 0x1B
+    push rsi
+    push qword 0x3202
+    push qword 0x23
+    push rdi
+
+    ; 5. Scrub kernel register state before exposing Ring 3 context
     xor rax, rax
     xor rbx, rbx
-    xor rbp, rbp
+    xor rcx, rcx
+    xor rdx, rdx
     xor rsi, rsi
     xor rdi, rdi
+    xor rbp, rbp
+    xor r8, r8
     xor r9, r9
     xor r10, r10
     xor r11, r11
@@ -48,20 +66,18 @@ EnterUserMode:
     xor r14, r14
     xor r15, r15
 
-    ; 4. Push iretq frame (5 qwords):
-    ; [rsp + 32] = User SS:   0x1B (User Data Selector 0x18 | 3)
-    ; [rsp + 24] = User RSP:  rdx (16-byte aligned)
-    ; [rsp + 16] = RFLAGS:    0x3202 (IF = 1 enabled, IOPL = 3)
-    ; [rsp + 8]  = User CS:   0x23 (User Code Selector 0x20 | 3)
-    ; [rsp + 0]  = User RIP:  rcx (entryRip)
-    push 0x1B
-    push rdx
-    push 0x3202
-    push 0x23
-    push rcx
-
-    ; 5. Execute iretq to drop CPL from 0 to 3
+    ; 6. Execute iretq to drop CPL from 0 to 3
     iretq
+
+; -----------------------------------------------------------------------------
+; void EnterUserMode(ulong userRip, ulong userRsp, ulong cr3)
+; Static Win64 ABI entry point (RCX=rip, RDX=rsp, R8=cr3) mapping to System V ABI:
+; -----------------------------------------------------------------------------
+EnterUserMode:
+    mov rdi, rcx
+    mov rsi, rdx
+    mov rdx, r8
+    jmp DropToUser
 
 ; -----------------------------------------------------------------------------
 ; User Thread Start Trampoline
@@ -72,6 +88,8 @@ extern ReleaseSchedulerLock
 UserThreadTrampoline:
     ; Release scheduler spinlock acquired during context switch
     sub rsp, 32
+    mov rcx, 0x202
+    mov rdi, 0x202
     call ReleaseSchedulerLock
     add rsp, 32
 

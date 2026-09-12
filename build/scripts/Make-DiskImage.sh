@@ -487,6 +487,7 @@ echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
     --directpinvoke:DoSyscall \
     --directpinvoke:GetSyscallEntry \
     --directpinvoke:GetThreadStartTrampoline \
+    --directpinvoke:DropToUser \
     --directpinvoke:EnterUserMode \
     --directpinvoke:SetSyscallKernelRsp \
     --directpinvoke:GetUserThreadTrampoline \

@@ -28,8 +28,12 @@ namespace Kernel.Arch.x86_64.Descriptors
     {
         public const ushort KernelCodeSelector = 0x08;
         public const ushort KernelDataSelector = 0x10;
-        public const ushort UserDataSelector   = 0x18;
-        public const ushort UserCodeSelector   = 0x20;
+        public const ushort UserDsOffset       = 0x18;
+        public const ushort UserCsOffset       = 0x20;
+        public const ushort UserDsSelector     = (ushort)(UserDsOffset | 3); // 0x1B
+        public const ushort UserCsSelector     = (ushort)(UserCsOffset | 3); // 0x23
+        public const ushort UserDataSelector   = UserDsSelector;
+        public const ushort UserCodeSelector   = UserCsSelector;
         public const ushort TssSelector        = 0x28;
 
         public static GdtTable Table;

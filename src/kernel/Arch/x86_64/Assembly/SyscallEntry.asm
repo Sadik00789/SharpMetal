@@ -25,6 +25,8 @@ SyscallEntry:
     ; and `cli` before restore closes the preemption window. NMI (#2) cannot be masked
     ; and uses IST1 (see Idt.Initialize), so it never runs on this half-swapped RSP.
     mov [gs:24], rsp
+    mov rsp, [gs:16]
+    and rsp, -16
 
     ; 2. Preserve user context on the kernel stack FIRST (Phase 2a):
     ; AMD64 syscall HW overwrites RCX=user RIP and R11=user RFLAGS, so the

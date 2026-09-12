@@ -89,6 +89,9 @@ namespace Kernel.Arch.x86_64.Hardware
         public static extern ulong GetThreadStartTrampoline();
 
         [DllImport("*")]
+        public static extern void DropToUser(ulong userRip, ulong userRsp, ulong cr3);
+
+        [DllImport("*")]
         public static extern void EnterUserMode(ulong entryRip, ulong userRsp, ulong pml4Phys);
 
         [DllImport("*")]

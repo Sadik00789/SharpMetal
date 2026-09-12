@@ -353,7 +353,9 @@ namespace Kernel.Boot
                 ulong efer = Cpu.ReadMsr(Cpu.Ia32Efer);
                 Cpu.WriteMsr(Cpu.Ia32Efer, efer | 1UL);
 
-                ulong starVal = (0x0013UL << 48) | (0x0008UL << 32);
+                // Hardware sysretq: Target User CS = STAR[63:48] + 16 (0x10 + 16 = 0x20), Target User SS = STAR[63:48] + 8 (0x10 + 8 = 0x18)
+                // Hardware syscall: Target Kernel CS = STAR[47:32] (0x08), Target Kernel SS = STAR[47:32] + 8 (0x10)
+                ulong starVal = (0x0010UL << 48) | (0x0008UL << 32);
                 Cpu.WriteMsr(Cpu.Ia32Star, starVal);
 
                 ulong lstarVal = Cpu.GetSyscallEntry();

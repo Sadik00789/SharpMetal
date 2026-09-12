@@ -140,6 +140,10 @@ namespace StorageNvme
             PrpListPhys = SyscallWrappers.AllocDma(4096, 0x71005000UL);
             PrpList = (ulong*)0x71005000UL;
             ZeroMemory((byte*)PrpList, 4096);
+
+            // 5. Program Admin Queues
+            *(uint*)(Bar0 + NvmeRegisters.AQA) = (63U << 16) | 63U; // 64 entries each
+            *(ulong*)(Bar0 + NvmeRegisters.ASQ) = AsqPhys;
             *(ulong*)(Bar0 + NvmeRegisters.ACQ) = AcqPhys;
 
             // Enable controller (CC.EN = 1, 4KB page size, IOCQES=4, IOSQES=6 -> 0x00460001)
@@ -189,7 +193,7 @@ namespace StorageNvme
             // Serial Token 1
             SyscallWrappers.Log("[NVME] Controller initialized. Admin and I/O queues online.\n");
 
-            // 8. Canary Write to LBA 1
+            // 8. Canary Write to LBA 65535
             *(uint*)IoBuffer = 0xA55A1234;
             for (int i = 4; i < 512; i++) IoBuffer[i] = (byte)(i & 0xFF);
 
