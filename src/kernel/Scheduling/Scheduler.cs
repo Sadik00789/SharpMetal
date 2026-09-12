@@ -5,6 +5,7 @@ using Kernel.Arch.x86_64.Descriptors;
 using Kernel.Arch.x86_64.Hardware;
 using Kernel.Concurrency;
 using Kernel.Diagnostics;
+using Kernel.Ipc;
 using Kernel.Memory.Heap;
 using Kernel.Memory.Physical;
 using Kernel.Memory.Virtual;
@@ -633,10 +634,11 @@ namespace Kernel.Scheduling
                     }
                     curr->ReplyTarget = null;
                 }
-                
+                // Purge from BoundEndpoint queues (BlockedOnAny plus reply rendezvous).
+                // Plain BlockedOnSend/Receive threads never set BoundEndpoint, so a full
+                // dead-TCB sweep needs a global endpoint registry - not added this cycle.
+                if (curr->BoundEndpoint != null) ((Endpoint*)curr->BoundEndpoint)->PurgeThread(curr);
                 curr->BoundEndpoint = null;
-                curr->BoundNotification = null;
-
                 // Queue to zombie list if not TID 0 or TID 1
                 if (curr->Id > 1 && curr != MainThread && curr != IdleThread)
                 {

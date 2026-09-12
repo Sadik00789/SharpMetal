@@ -65,6 +65,10 @@ namespace Kernel.Arch.x86_64.Hardware
                 if (core == null || core->ApicId == CpuTopology.BspApicId) continue;
 
                 byte apicId = core->ApicId;
+                if (apicId >= 16) continue;
+
+                ApMailboxEntry* mbEarly = CpuTopology.GetMailbox(i);
+                if (mbEarly != null && mbEarly->Status != CpuTopology.BootStatusUnstarted && core->StackPointer != 0) continue;
 
                 // Allocate 16 KiB 16-byte aligned execution stack (4 physical pages)
                 ulong stackPhys = PageFrameAllocator.AllocateContiguousFrames(4);
@@ -84,6 +88,9 @@ namespace Kernel.Arch.x86_64.Hardware
 
                 Cpu.SetApInitialStack(apicId, stackTop);
             }
+
+            // Reset staged trampoline spinlock (offset 0x18 per nasm listing) for crash recovery
+            *(uint*)(trampDst + 0x18) = 0;
 
             // 3. Issue INIT-SIPI-SIPI sequence to each AP core
             for (int i = 0; i < CpuTopology.CoreCount; i++)
@@ -183,8 +190,10 @@ namespace Kernel.Arch.x86_64.Hardware
             perCpu->CoreIndex = coreIndex;
             perCpu->ApicId = (byte)apicId;
             perCpu->Tss.Initialize(intStackTop);
+            // Dedicated NMI/DF/MC stack on IST1 (separate 16 KiB so NMI never uses half-swapped RSP)
+            ulong nmiPhys = PageFrameAllocator.AllocateContiguousFrames(4);
+            perCpu->Tss.Ist1 = (Hhdm.PhysicalToVirtual(nmiPhys) + 16384) & ~15UL;
             perCpu->KernelRsp = intStackTop;
-            perCpu->UserRspScratch = 0;
 
             // 2. Initialize and load core's private GDT & TSS
             ulong tssVirt = (ulong)&perCpu->Tss;

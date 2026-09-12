@@ -21,10 +21,23 @@ global trampoline_entry64
 trampoline_entry64:
     dq 0
 
-align 8
+align 4
+global trampoline_lock
+trampoline_lock:
+    dd 0
 trampoline_code:
     cli
     cld
+    ; Serialize APs on shared 0x8000 page (32-bit xchg = implicit lock)
+    mov eax, 1
+.spin:
+    xchg eax, [trampoline_lock]
+    test eax, eax
+    jz .locked
+    pause
+    xor eax, eax
+    jmp .spin
+.locked:
 
     ; Setup flat real-mode segments (base 0)
     xor ax, ax
@@ -83,7 +96,8 @@ long64_entry:
     ; Reload CR3 with full 64-bit PML4 in Long Mode
     mov rax, [trampoline_pml4]
     mov cr3, rax
-
+    ; Release serialization lock (low page still identity-mapped here)
+    mov dword [trampoline_lock], 0
     ; Jump to canonical higher-half AP entry thunk (ApEntry64)
     mov rax, [trampoline_entry64]
     jmp rax

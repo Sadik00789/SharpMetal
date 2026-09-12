@@ -65,7 +65,7 @@ namespace FsFat32
             ReservedSectorCount = *(ushort*)(s_sectorBuf + 14);
             NumFATs = *(s_sectorBuf + 16);
             FATSz32 = *(uint*)(s_sectorBuf + 36);
-            RootClus = *(uint*)(s_sectorBuf + 44);
+            RootClus = *(uint*)(s_sectorBuf + 44) & 0x0FFFFFFF;
             if (RootClus == 0) RootClus = 2;
 
             // 3. Compute Base Offsets
@@ -81,7 +81,7 @@ namespace FsFat32
 
         public static ulong ClusterToLba(uint cluster)
         {
-            if (cluster < 2) return DataStartLba;
+            if (cluster < 2 || cluster >= 0x0FFFFFF8) return 0xFFFFFFFFFFFFFFFFUL;
             return DataStartLba + ((ulong)(cluster - 2) * (ulong)SectorsPerCluster);
         }
 
@@ -144,7 +144,7 @@ namespace FsFat32
                         {
                             ushort clusHi = *(ushort*)(entry + 20);
                             ushort clusLo = *(ushort*)(entry + 26);
-                            FoundFileCluster = ((uint)clusHi << 16) | (uint)clusLo;
+                            FoundFileCluster = ((((uint)clusHi << 16) | (uint)clusLo) & 0x0FFFFFFF);
                             FoundFileSize = *(uint*)(entry + 28);
 
                             // Serial Token for Phase 10

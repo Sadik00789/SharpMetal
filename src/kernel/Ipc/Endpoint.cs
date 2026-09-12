@@ -78,6 +78,43 @@ namespace Kernel.Ipc
             return t;
         }
 
+        public bool RemoveSend(ThreadControlBlock* tcb)
+        {
+            if (SendHead == null || tcb == null) return false;
+
+            if (SendHead == tcb)
+            {
+                SendHead = tcb->IpcWaitNext;
+                if (SendTail == tcb)
+                {
+                    SendTail = null;
+                }
+                tcb->IpcWaitNext = null;
+                return true;
+            }
+
+            ThreadControlBlock* prev = SendHead;
+            ThreadControlBlock* curr = prev->IpcWaitNext;
+
+            while (curr != null)
+            {
+                if (curr == tcb)
+                {
+                    prev->IpcWaitNext = curr->IpcWaitNext;
+                    if (SendTail == tcb)
+                    {
+                        SendTail = prev;
+                    }
+                    tcb->IpcWaitNext = null;
+                    return true;
+                }
+                prev = curr;
+                curr = curr->IpcWaitNext;
+            }
+
+            return false;
+        }
+
         public bool RemoveReceive(ThreadControlBlock* tcb)
         {
             if (ReceiveHead == null || tcb == null) return false;
@@ -113,6 +150,14 @@ namespace Kernel.Ipc
             }
 
             return false;
+        }
+
+        public void PurgeThread(ThreadControlBlock* tcb)
+        {
+            if (tcb == null) return;
+            RemoveSend(tcb);
+            RemoveReceive(tcb);
+            tcb->BoundEndpoint = null;
         }
 
         public bool HasSenders => SendHead != null;

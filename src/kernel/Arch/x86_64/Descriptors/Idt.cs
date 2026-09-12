@@ -57,6 +57,11 @@ namespace Kernel.Arch.x86_64.Descriptors
                     entries[i].OffsetHigh = (uint)((isrAddress >> 32) & 0xFFFFFFFFUL);
                     entries[i].Reserved = 0;
                 }
+                // NMI (#2), Double-Fault (#8), Machine-Check (#18) use dedicated IST1
+                // so an NMI during the syscall half-swapped RSP window never corrupts it.
+                entries[2].Ist = 1;
+                entries[8].Ist = 1;
+                entries[18].Ist = 1;
 
                 Pointer.Limit = (ushort)((256 * sizeof(IdtEntry)) - 1); // 4095 bytes
                 ulong baseAddr = (ulong)entries;

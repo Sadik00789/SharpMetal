@@ -375,8 +375,9 @@ ApEntry64:
     ; Fetch execution stack from ApInitialStacks[apicId]
     lea rdx, [rel ApInitialStacks]
     mov rsp, [rdx + rcx*8]
+    test rsp, rsp
+    jz .ap_halt
     and rsp, -16
-    sub rsp, 32            ; 32-byte shadow space (RSP 16-byte aligned before call)
 
     ; Call C# ApStartupHandler(ulong apicId)
     call ApStartupHandler

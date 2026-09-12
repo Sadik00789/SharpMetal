@@ -281,9 +281,12 @@ namespace NetVirtio
             }
 
             // 6. Poll used_idx with bounded timeout (16-bit wraparound-safe delta).
+            // Single descriptor 0 reused every TX (no free-list): overlapping SendPacket
+            // calls must serialize at the caller.
             int timeout = 100000;
             while (timeout-- > 0)
             {
+                System.Threading.Thread.MemoryBarrier();
                 ushort usedIdx = *(ushort*)(s_txRingVirt + 0xC02);
                 if ((ushort)(usedIdx - s_lastUsedIdx) != 0)
                 {
@@ -292,6 +295,7 @@ namespace NetVirtio
                 }
                 SyscallWrappers.Yield();
             }
+            if (timeout <= 0) return 0;
 
             return length;
         }

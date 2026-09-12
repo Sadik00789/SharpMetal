@@ -1,8 +1,3 @@
-# =============================================================================
-# SharpMetal Microkernel (.clineignore)
-# Prevents Cline from reading, searching, or indexing large binary artifacts,
-# build outputs, virtual disk images, and temporary execution logs.
-# =============================================================================
 
 # --- Git & Version Control ---
 .git/

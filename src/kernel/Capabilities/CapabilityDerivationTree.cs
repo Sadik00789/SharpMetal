@@ -91,6 +91,22 @@ namespace Kernel.Capabilities
                 currChild = next;
             }
             node->FirstChild = null;
+            // Clear the target node itself (keep node allocated and linked)
+            if (node->CNode != null && node->Slot < CNode.SlotCount)
+            {
+                Capability* cap = node->CNode->Get(node->Slot);
+                if (cap != null && !cap->IsNull)
+                {
+                    if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) &&
+                        cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
+                    {
+                        VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
+                        cap->MappedVirtualAddress = 0;
+                        cap->OwnerProcess = null;
+                    }
+                    node->CNode->Revoke(node->Slot);
+                }
+            }
         }
 
         public static void Delete(CdtNode* node)
@@ -136,7 +152,7 @@ namespace Kernel.Capabilities
                 Capability* cap = node->CNode->Get(node->Slot);
                 if (cap != null && !cap->IsNull)
                 {
-                    if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                    if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) &&
                         cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
                     {
                         VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
@@ -159,13 +175,14 @@ namespace Kernel.Capabilities
                 Capability* cap = cnode->Get(slot);
                 if (cap == null || cap->IsNull) return;
 
-                if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) && 
+                if ((cap->Type == CapabilityType.Frame || cap->Type == CapabilityType.VirtualPage) &&
                     cap->MappedVirtualAddress != 0 && cap->OwnerProcess != null)
                 {
                     VirtualMemorySpace.UnmapPage(cap->OwnerProcess->PageDirectoryPhysBase, cap->MappedVirtualAddress);
                     cap->MappedVirtualAddress = 0;
                     cap->OwnerProcess = null;
                 }
+                cnode->Revoke(slot);
             }
             finally
             {

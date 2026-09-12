@@ -200,8 +200,9 @@ namespace Kernel.Arch.x86_64.Hardware
                 ulong intStackPhys = Memory.Physical.PageFrameAllocator.AllocateContiguousFrames(4);
                 ulong intStackTop = (Memory.Virtual.Hhdm.PhysicalToVirtual(intStackPhys) + 16384) & ~15UL;
                 bspPerCpu->Tss.Initialize(intStackTop);
-                bspPerCpu->KernelRsp = intStackTop;
-                bspPerCpu->UserRspScratch = 0;
+                // Dedicated NMI/DF/MC stack on IST1 (separate 16 KiB so NMI never uses half-swapped RSP)
+                ulong nmiPhys = Memory.Physical.PageFrameAllocator.AllocateContiguousFrames(4);
+                bspPerCpu->Tss.Ist1 = (Memory.Virtual.Hhdm.PhysicalToVirtual(nmiPhys) + 16384) & ~15UL;
 
                 ulong tssVirt = (ulong)&bspPerCpu->Tss;
                 if (tssVirt < Memory.Virtual.Hhdm.Base) tssVirt += Memory.Virtual.Hhdm.Base;
