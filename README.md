@@ -116,8 +116,11 @@ baremetal-csharp-microkernel/
 │       ├── Make-DiskImage.sh       # Native AOT pipeline, packaging, and GPT/FAT32 staging
 │       ├── Make-UsbBootable.sh     # Safe flashing script for bare-metal USB drives
 │       ├── Pack-Initrd.py          # Serializes system server binaries into initial ramdisk
+│       ├── Record-Demo.py          # Frame capture and GIF demonstration generator
 │       ├── Run-Qemu.sh             # Launch QEMU with OVMF firmware, NVMe, and serial stdio
 │       └── Test-Harness.py         # Automated streaming verification suite with milestone regex checks
+├── docs/
+│   └── assets/                     # Demo animation GIF and visual documentation assets
 ├── src/
 │   ├── apps/
 │   │   └── shell/                  # Layer 12: Interactive graphic terminal shell (Micro-GC)
@@ -140,7 +143,7 @@ baremetal-csharp-microkernel/
 │   │   ├── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization, alpha blend
 │   │   └── Microkernel.Sdk/        # Userland IPC channels and namespace resolution
 │   ├── runtime/
-│   │   ├── Userland.PieLoader/     # Relocatable position-independent ELF loader
+│   │   ├── Userland.PieLoader/     # Relocatable position-independent executable (PIE/PE/ELF) loader
 │   │   ├── Userland.Runtime.Gc/    # Layer 8: Managed heap, mark-sweep micro-garbage collector
 │   │   └── Userland.Runtime.ZeroAlloc/ # Layer 8: Allocation-free driver runtime with dynamic NativeArena
 │   └── servers/                    # Ring 3 Isolated System Servers
@@ -153,6 +156,9 @@ baremetal-csharp-microkernel/
 │       ├── pci_server/             # Layer 9: PCIe ECAM topology discovery, MSI-X routing, and FLR control
 │       ├── roottask/               # Layer 7: Initial bootstrap task and CSpace delegator
 │       └── supervisor/             # Layer 11: Process watchdog and fault recovery supervisor
+├── tools/
+│   ├── InitrdBuilder/              # Standalone C# archive packager
+│   └── VmRunner/                   # Automation harness QEMU controller
 ├── .gitignore                      # Git exclusion rules for native & managed artifacts
 ├── Directory.Build.props           # Workspace-wide Roslyn and compilation flags
 └── README.md                       # Comprehensive architectural documentation
@@ -242,11 +248,12 @@ To run the microkernel immediately without compiling the source code:
 # 1. Download pre-built disk image
 curl -LO https://github.com/sadik00789/SharpMetal/releases/download/v1.1.0/disk.img
 
-# 2. Create backing image for NVMe benchmark storage
+# 2. Create backing image for NVMe benchmark storage & format FAT32
 qemu-img create -f raw nvme.img 64M
+mkfs.fat -F 32 -s 1 nvme.img
 
-# 3. Launch QEMU (Universal / Emulated AVX2)
-qemu-system-x86_64 -machine q35 -cpu max -m 1G \
+# 3. Launch QEMU (Universal / Emulated AVX2, 4 cores)
+qemu-system-x86_64 -machine q35 -cpu max -smp 4 -m 1G \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
   -drive file=disk.img,format=raw \
   -drive file=nvme.img,format=raw,if=none,id=nvm \
@@ -262,10 +269,10 @@ To build the microkernel from source, ensure your host build system (Linux x86-6
 ```bash
 # Ubuntu / Debian
 sudo apt-get update
-sudo apt-get install -y dotnet-sdk-10.0 nasm lld qemu-system-x86 ovmf parted mtools xorriso python3
+sudo apt-get install -y dotnet-sdk-10.0 nasm lld qemu-system-x86 ovmf parted mtools dosfstools xorriso python3
 
 # Arch Linux
-sudo pacman -S dotnet-sdk nasm lld qemu-system-x86 edk2-ovmf parted mtools xorriso python
+sudo pacman -S dotnet-sdk nasm lld qemu-system-x86 edk2-ovmf parted mtools dosfstools xorriso python
 ```
 
 ### 1. Build the Complete Microkernel & Disk Image
@@ -275,7 +282,7 @@ bash build/scripts/Make-DiskImage.sh
 ```
 This script automatically:
 1. Compiles `MiniCoreLib`, abstractions, and Roslyn generators.
-2. Builds IL binaries for the microkernel and all 7 userland servers.
+2. Builds IL binaries for the microkernel, 8 userland servers, and the interactive shell.
 3. Invokes RyuJIT / `ilc` (Native AOT) to emit freestanding COFF object files.
 4. Assembles assembly thunks (`nasm -f win64`).
 5. Links `BOOTX64.EFI` and server binaries using `lld-link`.
@@ -332,6 +339,8 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 | Command | Action | Output / Behavior |
 |---|---|---|
 | `help` | Display command list | Shows available shell commands and syntax |
+| `clear` | Clear terminal screen | Clears terminal character grid and resets cursor position |
+| `echo <text>` | Print text to terminal | Outputs specified string to the terminal grid |
 | `pci` | Enumerate PCIe ECAM devices | Scans buses 0..3 and lists discovered Host Bridges, Display Controllers, and NVMe drives |
 | `nvme` | Execute NVMe benchmark | Performs verified block write and read to LBA 65535 with canary validation (`0xA55A1234`) |
 | `cat <file>` | Read file via VFS | Uses `System.IO.File.ReadAllText` over IPC to read and display FAT32 filesystem contents (e.g. `cat /HELLO.TXT`) |
@@ -339,6 +348,7 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 | `net` | VirtIO-Net TX benchmark | Builds a 64-byte Ethernet broadcast frame (EtherType `0x88B5`) and transmits via split virtqueue descriptor staging |
 | `caps` | Inspect CSpace capability slots | Lists all root CNode slots and assigned access rights |
 | `ps` | Display process thread table | Displays active thread IDs, execution states, and priority levels |
+| `reboot` | System reboot | Invokes `sys_exit(1)`, triggers clean ACPI / keyboard controller reset |
 | `exit` | Microkernel shutdown | Invokes `sys_exit(0)`, triggers clean ACPI poweroff / VM shutdown, and exits execution |
 
 ---
@@ -361,7 +371,9 @@ The headless test harness confirms operational integrity across all 12 microkern
 [SUPERVISOR] Registered services: pci_server, display_server.
 [SUPERVISOR] Simulating driver fault and recovery cycle...
 [SUPERVISOR] Waiting for storage and filesystem stabilization...
-[PCI] Found Host Bridge / Display Controller / Storage Controller.
+[DISPLAY] AVX2 software compositor initialized. Framebuffer cleared.
+[PCI] Function-Level Reset (FLR) triggered for device.
+[SUPERVISOR] Service successfully reincarnated and reconnected.
 [NVME] Controller initialized. Admin and I/O queues online.
 [NVME] Verified block write to LBA 65535 (Canary: 0xA55A1234).
 [NVME] Verified block read from LBA 65535 matches canary.
