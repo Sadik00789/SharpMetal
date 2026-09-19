@@ -12,8 +12,13 @@
     <ProjectReference Include="../../../common/MiniCoreLib/MiniCoreLib.csproj" />
     <ProjectReference Include="../../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
     <ProjectReference Include="../../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+    <ProjectReference Include="../../net.stack/net.stack.csproj" />
     <ProjectReference Include="../../../compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../../apps/frontier_tests/NetTest.cs" Link="NetTest.cs" />
   </ItemGroup>
 </Project>

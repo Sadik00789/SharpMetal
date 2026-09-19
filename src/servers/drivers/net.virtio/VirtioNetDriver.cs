@@ -1,5 +1,6 @@
 using System;
 using Microkernel.Abstractions.Services;
+using NetStack;
 using Userland.Runtime.ZeroAlloc.Interop;
 
 namespace NetVirtio
@@ -22,6 +23,11 @@ namespace NetVirtio
         private static byte* s_txNotifyAddr = null;
         private static ushort s_lastUsedIdx = 0;
 
+        private static byte* s_rxNotifyAddr = null;
+        private static ushort s_rxLastUsedIdx = 0;
+        private static ulong s_rxBuffersPhys = 0;
+        private static byte* s_rxBuffersVirt = null;
+
         private static ulong s_rxRingPhys = 0;
         private static byte* s_rxRingVirt = null;
         private static ulong s_txRingPhys = 0;
@@ -42,6 +48,13 @@ namespace NetVirtio
 
         public static void Initialize()
         {
+            Mac0 = 0x52;
+            Mac1 = 0x54;
+            Mac2 = 0x00;
+            Mac3 = 0x12;
+            Mac4 = 0x34;
+            Mac5 = 0x56;
+
             // 1. PCIe ECAM Discovery
             ulong ecamVirt = 0x20000000UL;
             SyscallWrappers.MapMmio(0xE0000000UL, ecamVirt, 4194304, writeCombining: false);
@@ -130,8 +143,8 @@ namespace NetVirtio
                 }
             }
 
-            // Read MAC address from DeviceCfg if present
-            if (DeviceCfg != null)
+            // Read MAC address from DeviceCfg if present and non-zero
+            if (DeviceCfg != null && (DeviceCfg[0] != 0 || DeviceCfg[1] != 0 || DeviceCfg[2] != 0 || DeviceCfg[3] != 0 || DeviceCfg[4] != 0 || DeviceCfg[5] != 0))
             {
                 Mac0 = DeviceCfg[0];
                 Mac1 = DeviceCfg[1];
@@ -141,7 +154,7 @@ namespace NetVirtio
                 Mac5 = DeviceCfg[5];
             }
 
-            // 3. Allocate Virtqueues via AllocDma (Queue 0: RX, Queue 1: TX, plus TX staging buffer)
+            // 3. Allocate Virtqueues via AllocDma (Queue 0: RX, Queue 1: TX, plus TX staging buffer and RX buffers)
             s_rxRingPhys = SyscallWrappers.AllocDma(4096, 0x27000000UL);
             s_rxRingVirt = (byte*)0x27000000UL;
 
@@ -151,11 +164,33 @@ namespace NetVirtio
             s_txPacketPhys = SyscallWrappers.AllocDma(4096, 0x27020000UL);
             s_txPacketVirt = (byte*)0x27020000UL;
 
+            s_rxBuffersPhys = SyscallWrappers.AllocDma(65536, 0x27100000UL);
+            s_rxBuffersVirt = (byte*)0x27100000UL;
+
             for (int i = 0; i < 4096; i++)
             {
+                s_rxRingVirt[i] = 0;
                 s_txRingVirt[i] = 0;
                 s_txPacketVirt[i] = 0;
             }
+            for (int i = 0; i < 65536; i++)
+            {
+                s_rxBuffersVirt[i] = 0;
+            }
+
+            // Populate 16 RX descriptors covering 2048 bytes each
+            for (int i = 0; i < 16; i++)
+            {
+                *(ulong*)(s_rxRingVirt + (i * 16) + 0) = s_rxBuffersPhys + ((ulong)i * 2048);
+                *(uint*)(s_rxRingVirt + (i * 16) + 8) = 2048;
+                *(ushort*)(s_rxRingVirt + (i * 16) + 12) = 2; // VRING_DESC_F_WRITE
+                *(ushort*)(s_rxRingVirt + (i * 16) + 14) = 0; // next = 0
+
+                // Fill avail ring
+                *(ushort*)(s_rxRingVirt + 0x804 + (i * 2)) = (ushort)i;
+            }
+            *(ushort*)(s_rxRingVirt + 0x800) = 0;  // flags = 0
+            *(ushort*)(s_rxRingVirt + 0x802) = 16; // idx = 16
 
             // 4. Configure Virtqueues in CommonCfg if modern device is found
             if (CommonCfg != null)
@@ -173,9 +208,16 @@ namespace NetVirtio
                 *(ulong*)(CommonCfg + 32) = s_rxRingPhys; // queue_desc
                 *(ulong*)(CommonCfg + 40) = s_rxRingPhys + 0x800; // queue_driver
                 *(ulong*)(CommonCfg + 48) = s_rxRingPhys + 0xC00; // queue_device
+                *(ushort*)(CommonCfg + 26) = 0; // queue_msix_vector = 0 (maps to MSI-X vector 0 / Vector 0x31)
                 *(ushort*)(CommonCfg + 28) = 1; // queue_enable
 
-                // Queue 1: TX (Adjustment 2: Explicitly write 16 into queue_size)
+                ushort rxNotifyOff = *(ushort*)(CommonCfg + 30);
+                if (NotifyCfg != null)
+                {
+                    s_rxNotifyAddr = NotifyCfg + ((ulong)rxNotifyOff * NotifyOffMultiplier);
+                }
+
+                // Queue 1: TX
                 *(ushort*)(CommonCfg + 22) = 1; // queue_select
                 *(ushort*)(CommonCfg + 24) = 16; // queue_size = 16
                 *(ulong*)(CommonCfg + 32) = s_txRingPhys; // queue_desc
@@ -183,7 +225,6 @@ namespace NetVirtio
                 *(ulong*)(CommonCfg + 48) = s_txRingPhys + 0xC00; // queue_device
                 *(ushort*)(CommonCfg + 28) = 1; // queue_enable
 
-                // Adjustment 1: Calculate txDoorbell = NotifyCfg + (queue_notify_off * notify_off_multiplier)
                 ushort queueNotifyOff = *(ushort*)(CommonCfg + 30);
                 if (NotifyCfg != null)
                 {
@@ -192,9 +233,29 @@ namespace NetVirtio
 
                 // Status |= DRIVER_OK (4)
                 CommonCfg[20] = (byte)(CommonCfg[20] | 4);
+
+                // Kick RX doorbell
+                if (s_rxNotifyAddr != null)
+                {
+                    *(ushort*)s_rxNotifyAddr = 0;
+                }
+                else if (NotifyCfg != null)
+                {
+                    *(ushort*)NotifyCfg = 0;
+                }
             }
 
-            // 5. Emit Serial Token 4 for Phase 10
+            // 5. Initialize NetworkStack with our MAC and SendRawFrame callback
+            byte* localMac = stackalloc byte[6];
+            localMac[0] = Mac0;
+            localMac[1] = Mac1;
+            localMac[2] = Mac2;
+            localMac[3] = Mac3;
+            localMac[4] = Mac4;
+            localMac[5] = Mac5;
+            NetworkStack.Initialize(localMac, &SendRawFrame);
+
+            // 6. Emit Serial Tokens
             SyscallWrappers.Log("[VIRTIO-NET] Modern PCI VirtIO Network device detected.\n");
             SyscallWrappers.Log("[VIRTIO] VirtIO-Net controller online. MAC: ");
             PrintHexByte(Mac0); SyscallWrappers.Log(":");
@@ -203,6 +264,7 @@ namespace NetVirtio
             PrintHexByte(Mac3); SyscallWrappers.Log(":");
             PrintHexByte(Mac4); SyscallWrappers.Log(":");
             PrintHexByte(Mac5); SyscallWrappers.Log("\n");
+            SyscallWrappers.Log("[NET] RX Virtqueue replenished with 16 descriptors.\n");
         }
 
         public static uint GetMacAddress(ulong outMacBufferPhys)
@@ -222,13 +284,10 @@ namespace NetVirtio
             return 0;
         }
 
-        public static uint SendPacket(ulong packetPhys, uint length)
+        public static void SendRawFrame(byte* frame, uint length)
         {
-            if (s_txRingVirt == null || s_txPacketVirt == null) return 0;
-
-            // 1. Map client packet buffer and copy into staging buffer with 12-byte virtio_net_hdr prefix
-            ulong clientVirt = 0x27030000UL;
-            SyscallWrappers.MapMmio(packetPhys, clientVirt, 4096, writeCombining: false);
+            if (s_txRingVirt == null || s_txPacketVirt == null || frame == null || length == 0) return;
+            if (length > 1514) length = 1514;
 
             // Zero 12-byte virtio_net_hdr
             for (int i = 0; i < 12; i++)
@@ -236,42 +295,30 @@ namespace NetVirtio
                 s_txPacketVirt[i] = 0;
             }
 
-            byte* src = (byte*)clientVirt;
             byte* dst = s_txPacketVirt + 12;
-            for (uint i = 0; i < length && i < 1500; i++)
+            for (uint i = 0; i < length; i++)
             {
-                dst[i] = src[i];
+                dst[i] = frame[i];
             }
 
             uint totalLen = 12 + length;
 
-            // 2. Write descriptor 0
+            // Write descriptor 0
             *(ulong*)(s_txRingVirt + 0) = s_txPacketPhys; // addr
             *(uint*)(s_txRingVirt + 8) = totalLen;        // len
             *(ushort*)(s_txRingVirt + 12) = 0;            // flags = 0
             *(ushort*)(s_txRingVirt + 14) = 0;            // next = 0
 
-            // 3. Put descriptor into avail_ring slot (VirtIO 16-bit wraparound):
-            // avail->idx / used->idx are 16-bit circular counters; mask the
-            // slot and wrap the counter with explicit ushort arithmetic.
             const int TxRingSize = 16;
             ushort availIdx = *(ushort*)(s_txRingVirt + 0x802);
             ushort slot = (ushort)(availIdx & (TxRingSize - 1));
             *(ushort*)(s_txRingVirt + 0x804 + (slot * 2)) = 0;
 
-            // 4. Descriptor-visibility barrier BEFORE publishing the new index.
             System.Threading.Thread.MemoryBarrier();
             *(ushort*)(s_txRingVirt + 0x802) = (ushort)(availIdx + 1);
 
-            // 5. Ring TX doorbell: calculate txDoorbell = NotifyCfg + (queue_notify_off * notify_off_multiplier), write '1' to kick Queue 1
-            if (CommonCfg != null && NotifyCfg != null)
-            {
-                *(ushort*)(CommonCfg + 22) = 1; // queue_select = 1
-                ushort queue_notify_off = *(ushort*)(CommonCfg + 30);
-                byte* txDoorbell = NotifyCfg + ((ulong)queue_notify_off * NotifyOffMultiplier);
-                *(ushort*)txDoorbell = 1;
-            }
-            else if (s_txNotifyAddr != null)
+            // Ring TX doorbell
+            if (s_txNotifyAddr != null)
             {
                 *(ushort*)s_txNotifyAddr = 1;
             }
@@ -280,9 +327,7 @@ namespace NetVirtio
                 *(ushort*)NotifyCfg = 1;
             }
 
-            // 6. Poll used_idx with bounded timeout (16-bit wraparound-safe delta).
-            // Single descriptor 0 reused every TX (no free-list): overlapping SendPacket
-            // calls must serialize at the caller.
+            // Poll used_idx
             int timeout = 100000;
             while (timeout-- > 0)
             {
@@ -295,14 +340,65 @@ namespace NetVirtio
                 }
                 SyscallWrappers.Yield();
             }
-            if (timeout <= 0) return 0;
+        }
 
+        public static uint SendPacket(ulong packetPhys, uint length)
+        {
+            if (packetPhys == 0 || length == 0) return 0;
+
+            ulong clientVirt = 0x27030000UL;
+            SyscallWrappers.MapMmio(packetPhys, clientVirt, 4096, writeCombining: false);
+            SendRawFrame((byte*)clientVirt, length);
             return length;
+        }
+
+        public static void ProcessRxPackets()
+        {
+            if (s_rxRingVirt == null || s_rxBuffersVirt == null) return;
+
+            System.Threading.Thread.MemoryBarrier();
+            ushort usedIdx = *(ushort*)(s_rxRingVirt + 0xC02);
+            bool replenished = false;
+
+            while (s_rxLastUsedIdx != usedIdx)
+            {
+                ushort slot = (ushort)(s_rxLastUsedIdx & 15);
+                byte* elem = s_rxRingVirt + 0xC04 + (slot * 8);
+                uint descId = *(uint*)elem;
+                uint len = *(uint*)(elem + 4);
+
+                if (descId < 16 && len > 12)
+                {
+                    byte* rxBufVirt = s_rxBuffersVirt + ((ulong)descId * 2048);
+                    // CRITICAL CORRECTION 1: Skip 12-byte virtio_net_hdr prefix!
+                    byte* frameStart = rxBufVirt + 12;
+                    uint frameLen = len - 12;
+                    Ethernet.ProcessPacket(frameStart, frameLen);
+                }
+
+                // Replenish descriptor in avail ring
+                ushort availIdx = *(ushort*)(s_rxRingVirt + 0x802);
+                ushort availSlot = (ushort)(availIdx & 15);
+                *(ushort*)(s_rxRingVirt + 0x804 + (availSlot * 2)) = (ushort)descId;
+                System.Threading.Thread.MemoryBarrier();
+                *(ushort*)(s_rxRingVirt + 0x802) = (ushort)(availIdx + 1);
+                replenished = true;
+
+                s_rxLastUsedIdx++;
+                System.Threading.Thread.MemoryBarrier();
+                usedIdx = *(ushort*)(s_rxRingVirt + 0xC02);
+            }
+
+            if (replenished && s_rxNotifyAddr != null)
+            {
+                *(ushort*)s_rxNotifyAddr = 0;
+            }
         }
 
         public static uint ReceivePacket(ulong packetPhys, uint maxLength)
         {
-            return 0; // No packet pending in polled test
+            ProcessRxPackets();
+            return 0;
         }
     }
 }

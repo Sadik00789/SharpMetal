@@ -1,4 +1,5 @@
-#!/usr/bin/env python3
+#!/usr/bin/env bash
+''''exec python3 "$0" "$@" #'''
 import subprocess
 import sys
 import re
@@ -15,6 +16,12 @@ REQUIRED_MILESTONES = [
     r"\[NVME\] Controller initialized",
     r"\[NVME\] Block I/O benchmark passed",
     r"\[VIRTIO-NET\] Modern PCI VirtIO Network device detected",
+    r"\[PASS\] VMM: Demand paging resolved fault at 0x[0-9A-F]+",
+    r"\[PASS\] COW: Frame duplicated on write",
+    r"\[PASS\] ELF: /bin/test.pie relocated and entry executed",
+    r"Hello from ELF",
+    r"\[NET\] RX Virtqueue replenished with 16 descriptors",
+    r"\[PASS\] NET: VirtIO RX/TX loopback / ICMP processed",
     r"\[SHELL\] SharpMetal Bare-Metal Shell online",
 ]
 

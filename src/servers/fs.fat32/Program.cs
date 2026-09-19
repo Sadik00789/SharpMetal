@@ -27,6 +27,11 @@ namespace FsFat32
         {
             return Fat32Driver.Close(fileHandle);
         }
+
+        public ulong ReadCluster(uint fileHandle, uint clusterIndex, ulong outBufferPhys)
+        {
+            return Fat32Driver.ReadCluster(fileHandle, clusterIndex, outBufferPhys);
+        }
     }
 
     public static unsafe class Program

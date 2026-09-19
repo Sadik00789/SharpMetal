@@ -9,7 +9,7 @@ export PATH="${HOME}/.dotnet:${HOME}/.local/bin:${PATH}"
 export LD_LIBRARY_PATH="${HOME}/.local/usr/lib64:${LD_LIBRARY_PATH:-}"
 
 # Pre-flight dependency check for required toolchain binaries
-REQUIRED_TOOLS=(dotnet nasm lld-link python3 dd mkfs.fat parted mformat mcopy mmd)
+REQUIRED_TOOLS=(dotnet nasm lld-link python3 dd mkfs.fat parted mformat mcopy mmd gcc)
 MISSING_TOOLS=()
 for tool in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "$tool" >/dev/null 2>&1; then
@@ -44,8 +44,23 @@ dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/Userland.Runti
 echo "[BUILD] Compiling Userland.Runtime.Gc..."
 dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" -c Release
 
+echo "[BUILD] Compiling Microkernel.Vfs IL..."
+dotnet build "${REPO_ROOT}/src/common/Microkernel.Vfs/Microkernel.Vfs.csproj" -c Release
+mkdir -p "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}"
+mkdir -p "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}"
+cp -f "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}/Microkernel.Vfs.dll" \
+      "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" 2>/dev/null || true
+cp -f "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
+      "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}/Microkernel.Vfs.dll" 2>/dev/null || true
+
 echo "[BUILD] Compiling Userland.PieLoader IL..."
 dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release
+mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}"
+mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}"
+cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
+      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
+cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
+      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
 
 echo "[BUILD] Compiling roottask IL..."
 dotnet build "${REPO_ROOT}/src/servers/roottask/roottask.csproj" -c Release
@@ -68,14 +83,20 @@ dotnet build "${REPO_ROOT}/src/servers/drivers/storage.nvme/storage.nvme.csproj"
 echo "[BUILD] Compiling input.hid IL..."
 dotnet build "${REPO_ROOT}/src/servers/drivers/input.hid/input.hid.csproj" -c Release
 
+echo "[BUILD] Compiling net.stack IL..."
+dotnet build "${REPO_ROOT}/src/servers/net.stack/net.stack.csproj" -c Release
+mkdir -p "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}"
+mkdir -p "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}"
+cp -f "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" \
+      "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}/net.stack.dll" 2>/dev/null || true
+cp -f "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}/net.stack.dll" \
+      "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" 2>/dev/null || true
+
 echo "[BUILD] Compiling net.virtio IL..."
 dotnet build "${REPO_ROOT}/src/servers/drivers/net.virtio/net.virtio.csproj" -c Release
 
 echo "[BUILD] Compiling fs.fat32 IL..."
 dotnet build "${REPO_ROOT}/src/servers/fs.fat32/fs.fat32.csproj" -c Release
-
-echo "[BUILD] Compiling Microkernel.Vfs IL..."
-dotnet build "${REPO_ROOT}/src/common/Microkernel.Vfs/Microkernel.Vfs.csproj" -c Release
 
 echo "[BUILD] Compiling shell IL..."
 dotnet build "${REPO_ROOT}/src/apps/shell/shell.csproj" -c Release
@@ -144,6 +165,8 @@ echo "[AOT] Compiling roottask via Native AOT (ilc)..."
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
     -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.obj" \
     --targetos windows \
     --targetarch x64 \
@@ -343,6 +366,7 @@ echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
     -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
     -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
     -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -r "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" \
     -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.obj" \
     --targetos windows \
     --targetarch x64 \
@@ -582,6 +606,14 @@ mkfs.fat -F 32 -s 1 "${NVME_IMG}"
 TMP_HELLO="${TMP_DIR}/HELLO.TXT"
 printf "SharpMetal BareMetal OS" > "${TMP_HELLO}"
 mcopy -i "${NVME_IMG}" "${TMP_HELLO}" ::/HELLO.TXT
+
+echo "[ELF] Compiling freestanding static PIE ElfTest.c..."
+TMP_ELF="${TMP_DIR}/test.pie"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_ELF}" "${REPO_ROOT}/src/apps/frontier_tests/ElfTest.c"
+mmd -i "${NVME_IMG}" ::/bin || true
+mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/test.pie
+mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/elftest.pie
+mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/test.pie
 
 # Build raw GPT disk image with FAT32 ESP
 DISK_IMG="${REPO_ROOT}/build/disk.img"

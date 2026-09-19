@@ -11,5 +11,10 @@ namespace Kernel.Scheduling
         public ulong PageDirectoryPhysBase;  // offset 8
         public CNode* CSpaceRoot;            // offset 16
         public ProcessControlBlock* Next;    // offset 24
+        public Kernel.Memory.Virtual.VirtualMemoryRegion* VmaHead; // offset 32
+        public ulong HeapStart;              // offset 40
+        public ulong HeapEnd;                // offset 48
+        public ulong NextMmapAddress;        // offset 56
+        public bool IsUsed;                  // offset 64
     }
 }

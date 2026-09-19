@@ -13,6 +13,7 @@ namespace Microkernel.Vfs
 
         public static uint ResolveEndpoint(string path)
         {
+            if (s_rootEndpoint == 0) return 11;
             return s_rootEndpoint;
         }
     }

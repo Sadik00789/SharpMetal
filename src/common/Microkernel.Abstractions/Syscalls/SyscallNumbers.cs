@@ -16,6 +16,7 @@ namespace Microkernel.Abstractions.Syscalls
         public const ulong SysAllocDma      = 0x0A;
         public const ulong SysSpawn         = 0x0B;
         public const ulong Spawn            = SysSpawn;
+        public const ulong SysSpawnElf      = 0x0C;
 
         // Phase 5 IPC primitives
         public const ulong SysSend    = 0x10;
@@ -24,5 +25,13 @@ namespace Microkernel.Abstractions.Syscalls
         public const ulong SysReply   = 0x13;
         public const ulong SysNotify  = 0x14;
         public const ulong SysRecvAny = 0x15;
+
+        // Dynamic Memory primitives
+        public const ulong SysMmap    = 0x20;
+        public const ulong SysBrk     = 0x21;
+
+        // POSIX / I/O primitives
+        public const ulong SysRead    = 0x24;
+        public const ulong SysWrite   = 0x25;
     }
 }

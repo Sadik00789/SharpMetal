@@ -17,6 +17,7 @@ namespace Kernel.Memory.Virtual
         public const ulong Pat4K = 1UL << 7;     // PAT bit for 4KB page in Page Table
         public const ulong Pat2M = 1UL << 12;    // PAT bit for 2MB page in Page Directory
         public const ulong Global = 1UL << 8;
+        public const ulong Cow = 1UL << 9;       // Software bit 9 for Copy-On-Write
         public const ulong NoExecute = 1UL << 63;
 
         public const ulong AddressMask = 0x000F_FFFF_FFFF_F000UL;

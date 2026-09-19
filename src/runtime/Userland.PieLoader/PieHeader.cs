@@ -33,22 +33,6 @@ namespace Userland.PieLoader
         public uint SizeOfBlock;
     }
 
-    /// <summary>
-    /// ELF64 relocation with addend (SHT_RELA entry), x86-64 System V ABI.
-    /// r_offset: location to patch (offset from BaseAddress for PIE).
-    /// r_info:   (sym << 32) | type.
-    /// r_addend: signed addend applied during relocation.
-    /// </summary>
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct Elf64_Rela
-    {
-        public ulong r_offset;
-        public ulong r_info;
-        public long r_addend;
-
-        public ulong R_Sym => r_info >> 32;
-        public uint R_Type => (uint)(r_info & 0xFFFFFFFFUL);
-    }
 
     /// <summary>ELF64 symbol table entry (SysV ABI, 24 bytes).</summary>
     [StructLayout(LayoutKind.Sequential, Pack = 1)]

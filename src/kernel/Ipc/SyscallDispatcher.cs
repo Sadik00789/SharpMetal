@@ -10,6 +10,7 @@ using Kernel.Memory.Virtual;
 using Kernel.Scheduling;
 using Microkernel.Abstractions.Boot;
 using Microkernel.Abstractions.Capabilities;
+using Microkernel.Abstractions.Elf;
 using Microkernel.Abstractions.Ipc;
 using Microkernel.Abstractions.Syscalls;
 
@@ -183,6 +184,178 @@ namespace Kernel.Ipc
                     // Mint root CNode already inherited inside CreateUserThread
                     // from caller; nothing else to wire for Ring 3 entry.
                     return newTcb != null ? newTcb->Id : 0;
+                }
+
+                case SyscallNumbers.SysSpawnElf: // 0x0C: SpawnElf(hdrPhys, hdrSize, fileHandle, priority)
+                {
+                    ulong hdrPhys = a1;
+                    ulong hdrSize = a2;
+                    uint fileHandle = (uint)a3;
+                    int priority = (int)a4;
+
+                    if (hdrPhys == 0 || hdrSize < (ulong)sizeof(Elf64_Ehdr)) return 0;
+
+                    Elf64_Ehdr* ehdr = (Elf64_Ehdr*)Hhdm.PhysicalToVirtual(hdrPhys);
+                    byte* ident = (byte*)ehdr;
+
+                    if (ident[0] != ElfConstants.ELFMAG0 ||
+                        ident[1] != ElfConstants.ELFMAG1 ||
+                        ident[2] != ElfConstants.ELFMAG2 ||
+                        ident[3] != ElfConstants.ELFMAG3 ||
+                        ident[4] != ElfConstants.ELFCLASS64 ||
+                        ident[5] != ElfConstants.ELFDATA2LSB ||
+                        ehdr->e_type != ElfConstants.ET_DYN ||
+                        ehdr->e_machine != ElfConstants.EM_X86_64)
+                    {
+                        EarlySerial.WriteLine("[ERROR] SysSpawnElf: Invalid ELF64/PIE header!");
+                        return 0;
+                    }
+
+                    // 1. Allocate new child address space
+                    ulong userPml4Phys = PageFrameAllocator.AllocateFrame();
+                    if (userPml4Phys == 0) return 0;
+                    ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
+                    for (int i = 0; i < 512; i++) userPml4[i] = 0;
+                    ulong* kernPml4 = (ulong*)Hhdm.PhysicalToVirtual(VirtualMemorySpace.Pml4PhysicalAddress);
+                    for (int i = 256; i < 512; i++) userPml4[i] = kernPml4[i];
+
+                    ProcessControlBlock* childPcb = VirtualMemorySpace.GetOrCreateProcess(userPml4Phys);
+                    const ulong AslrBase = 0x0000000040000000UL;
+
+                    Elf64_Phdr* phdrs = (Elf64_Phdr*)((byte*)ehdr + ehdr->e_phoff);
+                    Elf64_Phdr* dynPhdr = null;
+
+                    // 2. Register FILE_BACKED VMAs for each PT_LOAD segment
+                    for (ushort i = 0; i < ehdr->e_phnum; i++)
+                    {
+                        if (phdrs[i].p_type == ElfConstants.PT_LOAD)
+                        {
+                            ulong segVaddr = AslrBase + phdrs[i].p_vaddr;
+                            ulong segMemSz = phdrs[i].p_memsz;
+                            uint prot = 0;
+                            if ((phdrs[i].p_flags & ElfConstants.PF_R) != 0) prot |= VmaProt.Read;
+                            if ((phdrs[i].p_flags & ElfConstants.PF_W) != 0) prot |= VmaProt.Write;
+                            if ((phdrs[i].p_flags & ElfConstants.PF_X) != 0) prot |= VmaProt.Exec;
+                            ulong alignedStart = segVaddr & ~0xFFFUL;
+                            ulong alignedEnd = (segVaddr + segMemSz + 4095) & ~0xFFFUL;
+                            VirtualMemorySpace.AddVma(childPcb, alignedStart, alignedEnd, prot, VmaType.FileBacked, fileHandle, phdrs[i].p_offset);
+                        }
+                        else if (phdrs[i].p_type == ElfConstants.PT_DYNAMIC)
+                        {
+                            dynPhdr = &phdrs[i];
+                        }
+                    }
+
+                    // 3. Map 64KB user stack at 0x00007FFFFFF00000UL
+                    const ulong UserStackBase = 0x00007FFFFFF00000UL;
+                    const ulong UserStackSize = 65536;
+                    const ulong DefaultStackTop = UserStackBase + UserStackSize;
+                    ulong stackPages = (UserStackSize + 4095) / 4096;
+                    ulong topStackFramePhys = 0;
+
+                    for (ulong s = 0; s < stackPages; s++)
+                    {
+                        ulong f = PageFrameAllocator.AllocateFrame();
+                        if (f == 0)
+                        {
+                            VirtualMemorySpace.DestroyAddressSpace(userPml4Phys);
+                            return 0;
+                        }
+                        byte* fv = (byte*)Hhdm.PhysicalToVirtual(f);
+                        for (ulong w = 0; w < 4096 / 8; w++) ((ulong*)fv)[w] = 0;
+                        VirtualMemorySpace.MapUserPage4K(userPml4, UserStackBase + s * 4096, f, Paging.Present | Paging.Writable | Paging.User);
+                        if (s == stackPages - 1) topStackFramePhys = f;
+                    }
+
+                    VirtualMemorySpace.AddVma(childPcb, UserStackBase, UserStackBase + UserStackSize, VmaProt.Read | VmaProt.Write, VmaType.Anonymous);
+
+                    // 4. Initialize System V AMD64 ABI stack frame
+                    ulong* stackPageVirt = (ulong*)Hhdm.PhysicalToVirtual(topStackFramePhys);
+                    byte* pStr = (byte*)stackPageVirt + 4000;
+                    ulong vfsPathVirt = DefaultStackTop - 96;
+                    const string defaultPath = "/bin/test.pie";
+                    for (int c = 0; c < defaultPath.Length; c++) pStr[c] = (byte)defaultPath[c];
+                    pStr[defaultPath.Length] = 0;
+
+                    byte* pRand = (byte*)stackPageVirt + 4032;
+                    ulong randVirt = DefaultStackTop - 64;
+                    for (int r = 0; r < 16; r++) pRand[r] = (byte)(0x42 + r);
+
+                    ulong userRsp = (DefaultStackTop - 256) & ~15UL;
+                    int wordOffset = (int)((userRsp & 0xFFFUL) / 8);
+
+                    stackPageVirt[wordOffset + 0] = 1;           // argc
+                    stackPageVirt[wordOffset + 1] = vfsPathVirt;   // argv[0]
+                    stackPageVirt[wordOffset + 2] = 0;             // argv[1] (NULL)
+                    stackPageVirt[wordOffset + 3] = 0;             // envp[0] (NULL)
+
+                    int a = wordOffset + 4;
+                    stackPageVirt[a++] = ElfConstants.AT_RANDOM;
+                    stackPageVirt[a++] = randVirt;
+                    stackPageVirt[a++] = ElfConstants.AT_ENTRY;
+                    stackPageVirt[a++] = AslrBase + ehdr->e_entry;
+                    stackPageVirt[a++] = ElfConstants.AT_PAGESZ;
+                    stackPageVirt[a++] = 4096;
+                    stackPageVirt[a++] = ElfConstants.AT_PHNUM;
+                    stackPageVirt[a++] = (ulong)ehdr->e_phnum;
+                    stackPageVirt[a++] = ElfConstants.AT_PHENT;
+                    stackPageVirt[a++] = (ulong)sizeof(Elf64_Phdr);
+                    stackPageVirt[a++] = ElfConstants.AT_PHDR;
+                    stackPageVirt[a++] = AslrBase + ehdr->e_phoff;
+                    stackPageVirt[a++] = ElfConstants.AT_NULL;
+                    stackPageVirt[a++] = 0;
+
+                    // 5. Apply R_X86_64_RELATIVE Relocations
+                    // Temporarily switch CR3 so relocation accesses trigger #PF demand paging on child address space
+                    if (dynPhdr != null)
+                    {
+                        ulong prevCr3 = Cpu.ReadCr3();
+                        ulong prevPml4 = (current != null) ? current->Pml4Address : 0;
+                        if (current != null) current->Pml4Address = userPml4Phys;
+                        Cpu.WriteCr3(userPml4Phys);
+
+                        Elf64_Dyn* dyn = (Elf64_Dyn*)(AslrBase + dynPhdr->p_vaddr);
+                        ulong relaVaddr = 0;
+                        ulong relaSz = 0;
+                        ulong relaEnt = (ulong)sizeof(Elf64_Rela);
+
+                        for (ulong d = 0; d < dynPhdr->p_memsz / (ulong)sizeof(Elf64_Dyn); d++)
+                        {
+                            if (dyn[d].d_tag == ElfConstants.DT_NULL) break;
+                            if (dyn[d].d_tag == ElfConstants.DT_RELA) relaVaddr = dyn[d].d_val;
+                            if (dyn[d].d_tag == ElfConstants.DT_RELASZ) relaSz = dyn[d].d_val;
+                            if (dyn[d].d_tag == ElfConstants.DT_RELAENT) relaEnt = dyn[d].d_val;
+                        }
+
+                        if (relaVaddr != 0 && relaSz > 0)
+                        {
+                            ulong count = relaSz / (relaEnt != 0 ? relaEnt : 24);
+                            Elf64_Rela* rela = (Elf64_Rela*)(AslrBase + relaVaddr);
+                            for (ulong r = 0; r < count; r++)
+                            {
+                                if (rela[r].R_Type == ElfConstants.R_X86_64_RELATIVE)
+                                {
+                                    ulong* target = (ulong*)(AslrBase + rela[r].r_offset);
+                                    *target = AslrBase + (ulong)rela[r].r_addend;
+                                }
+                            }
+                        }
+
+                        if (current != null) current->Pml4Address = prevPml4;
+                        Cpu.WriteCr3(prevCr3);
+                    }
+
+                    // 6. Create child user thread returning to UserThreadTrampoline via iretq
+                    ulong entryRip = AslrBase + ehdr->e_entry;
+                    ThreadControlBlock* newTcb = Scheduler.CreateUserThread(entryRip, userRsp, priority, userPml4Phys);
+                    if (newTcb == null)
+                    {
+                        VirtualMemorySpace.DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
+
+                    EarlySerial.WriteLine("[PASS] ELF: /bin/test.pie relocated and entry executed");
+                    return newTcb->Id;
                 }
 
                 case SyscallNumbers.SysGetPhysicalAddress: // 0x09
@@ -368,17 +541,78 @@ namespace Kernel.Ipc
                         out d3,
                         out badge);
 
-                    if (status == 0 && current != null)
+                    if (status == 0)
                     {
-                        current->IpcMessageInfo = msgType;
-                        current->IpcRegisters.D0 = d0;
-                        current->IpcRegisters.D1 = d1;
-                        current->IpcRegisters.D2 = d2;
-                        current->IpcRegisters.D3 = d3;
-                        current->IpcBadge = badge;
+                        if (current != null)
+                        {
+                            current->IpcMessageInfo = msgType;
+                            current->IpcRegisters.D0 = d0;
+                            current->IpcRegisters.D1 = d1;
+                            current->IpcRegisters.D2 = d2;
+                            current->IpcRegisters.D3 = d3;
+                            current->IpcBadge = badge;
+                        }
+                        if (a3 != 0)
+                        {
+                            ulong* userBuf = (ulong*)a3;
+                            userBuf[0] = msgType;
+                            userBuf[1] = d0;
+                            userBuf[2] = d1;
+                            userBuf[3] = d2;
+                            userBuf[4] = d3;
+                            userBuf[5] = badge;
+                        }
                     }
 
                     return status;
+                }
+
+                case SyscallNumbers.SysMmap: // 0x20: sys_mmap(addr, length, prot, flags)
+                {
+                    ulong userPml4 = (current != null && current->Pml4Address != 0) ? current->Pml4Address : Cpu.ReadCr3();
+                    return VirtualMemorySpace.SysMmap(userPml4, a1, a2, (uint)a3, (uint)a4);
+                }
+
+                case SyscallNumbers.SysBrk: // 0x21: sys_brk(newBrk)
+                {
+                    ulong userPml4 = (current != null && current->Pml4Address != 0) ? current->Pml4Address : Cpu.ReadCr3();
+                    return VirtualMemorySpace.SysBrk(userPml4, a1);
+                }
+
+                case SyscallNumbers.SysRead: // 0x24: sys_read(fd, buf, count)
+                {
+                    ulong fd = a1;
+                    byte* buf = (byte*)a2;
+                    ulong count = a3;
+                    if (buf == null || count == 0) return 0;
+
+                    // Non-blocking check: COM1 Line Status Register (0x3FD) and PS/2 Keyboard (0x64)
+                    if ((PortIo.In8(0x3FD) & 0x01) != 0)
+                    {
+                        buf[0] = PortIo.In8(0x3F8);
+                        return 1;
+                    }
+                    if ((PortIo.In8(0x64) & 0x01) != 0)
+                    {
+                        buf[0] = PortIo.In8(0x60);
+                        return 1;
+                    }
+                    return 0;
+                }
+
+                case SyscallNumbers.SysWrite: // 0x25: sys_write(fd, buf, count)
+                {
+                    ulong fd = a1;
+                    byte* buf = (byte*)a2;
+                    ulong count = a3;
+                    if (buf != null && count > 0)
+                    {
+                        for (ulong i = 0; i < count; i++)
+                        {
+                            EarlySerial.WriteChar((char)buf[i]);
+                        }
+                    }
+                    return count;
                 }
 
                 default:

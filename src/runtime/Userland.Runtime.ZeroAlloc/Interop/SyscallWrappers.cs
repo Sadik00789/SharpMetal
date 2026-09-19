@@ -75,6 +75,21 @@ namespace Userland.Runtime.ZeroAlloc.Interop
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong RecvAny(uint endpointCptr, uint notificationCptr, out ulong msgType, out ulong d0, out ulong d1, out ulong d2, out ulong d3, out ulong badge)
+        {
+            ulong* buf = stackalloc ulong[6];
+            buf[0] = 0; buf[1] = 0; buf[2] = 0; buf[3] = 0; buf[4] = 0; buf[5] = 0;
+            ulong status = Syscall(SyscallNumbers.SysRecvAny, endpointCptr, notificationCptr, (ulong)buf, 0, 0, 0);
+            msgType = buf[0];
+            d0 = buf[1];
+            d1 = buf[2];
+            d2 = buf[3];
+            d3 = buf[4];
+            badge = buf[5];
+            return status;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static ulong Call(uint cptr, ulong msgInfo, ulong d0, ulong d1, ulong d2, ulong d3)
         {
             return Syscall(SyscallNumbers.SysCall, cptr, msgInfo, d0, d1, d2, d3);
@@ -128,6 +143,31 @@ namespace Userland.Runtime.ZeroAlloc.Interop
         public static ulong Spawn(ulong entryVirt, ulong stackTop)
         {
             return Syscall(SyscallNumbers.SysSpawn, entryVirt, stackTop, 0, 0, 0, 0);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong SpawnElf(ulong hdrPhys, ulong hdrSize, uint fileHandle, int priority = 2)
+        {
+            return Syscall(SyscallNumbers.SysSpawnElf, hdrPhys, hdrSize, (ulong)fileHandle, (ulong)priority, 0, 0);
+        }
+
+        public const uint PROT_READ  = 1 << 0;
+        public const uint PROT_WRITE = 1 << 1;
+        public const uint PROT_EXEC  = 1 << 2;
+
+        public const uint MAP_ANONYMOUS = 0x20;
+        public const uint MAP_COW       = 0x40;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong Mmap(ulong addr, ulong length, uint prot = PROT_READ | PROT_WRITE, uint flags = MAP_ANONYMOUS)
+        {
+            return Syscall(SyscallNumbers.SysMmap, addr, length, (ulong)prot, (ulong)flags, 0, 0);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong Brk(ulong newBrk)
+        {
+            return Syscall(SyscallNumbers.SysBrk, newBrk, 0, 0, 0, 0, 0);
         }
     }
 }

@@ -103,9 +103,31 @@ namespace Kernel.Arch.x86_64.Hardware
             }
         }
 
+        public const ulong PfPresent    = 1UL << 0;
+        public const ulong PfWrite      = 1UL << 1;
+        public const ulong PfUser       = 1UL << 2;
+        public const ulong PfReserved   = 1UL << 3;
+        public const ulong PfInstrFetch = 1UL << 4;
+
+        public static bool HandlePageFault(ulong errorCode, InterruptContext* ctx)
+        {
+            ulong faultAddress = Cpu.ReadCr2();
+            if (faultAddress >= Kernel.Memory.Virtual.Hhdm.Base) return false;
+
+            return Kernel.Memory.Virtual.VirtualMemorySpace.ResolvePageFault(faultAddress, errorCode, ctx);
+        }
+
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "DispatchInterrupt")]
         public static unsafe void DispatchInterrupt(InterruptContext* ctx)
         {
+            if (ctx->Vector == 14)
+            {
+                if (HandlePageFault(ctx->ErrorCode, ctx))
+                {
+                    return;
+                }
+            }
+
             if (ctx->Vector == 0x20)
             {
                 TimerTicks++;
@@ -114,6 +136,12 @@ namespace Kernel.Arch.x86_64.Hardware
                 {
                     Kernel.Scheduling.Scheduler.OnTimerTick();
                 }
+                return;
+            }
+
+            if (ctx->Vector == 0x21 || ctx->Vector == 33)
+            {
+                LocalApic.SendEoi();
                 return;
             }
 

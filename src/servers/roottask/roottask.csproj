@@ -13,8 +13,14 @@
     <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
     <ProjectReference Include="../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
     <ProjectReference Include="../../runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Vfs/Microkernel.Vfs.csproj" />
+    <ProjectReference Include="../../runtime/Userland.PieLoader/Userland.PieLoader.csproj" />
     <ProjectReference Include="../../compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj"
                       OutputItemType="Analyzer"
                       ReferenceOutputAssembly="false" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="../../apps/frontier_tests/VmmTest.cs" Link="VmmTest.cs" />
   </ItemGroup>
 </Project>

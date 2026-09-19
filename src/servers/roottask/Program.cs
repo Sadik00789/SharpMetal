@@ -158,6 +158,10 @@ namespace Roottask
                 // Constraint 2: CSpace Delegation for System Servers
                 SyscallWrappers.Log("[ROOTTASK] Delegating CSpace capabilities: fs.fat32 -> Slot 9, shell -> Slot 11, Slot 12.\n");
 
+                // Frontier 1: VMM Self-Test (Demand Paging & COW)
+                SyscallWrappers.Log("[ROOTTASK] Running Frontier 1 VMM Self-Test...\n");
+                FrontierTests.VmmTest.Run();
+
                 // Spawn isolated child processes
                 SyscallWrappers.CreateProcess((ulong)pciPayload, pciSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)displayPayload, displaySize, 0x0000000040000000UL, 1);
@@ -173,6 +177,15 @@ namespace Roottask
                     SyscallWrappers.CreateProcess((ulong)fsPayload, fsSize, 0x0000000040000000UL, 1);
                 }
                 SyscallWrappers.CreateProcess((ulong)shellPayload, shellSize, 0x0000000040000000UL, 2);
+
+                // Yield to allow system servers (storage.nvme and fs.fat32) to mount filesystem
+                for (int y = 0; y < 100; y++)
+                {
+                    SyscallWrappers.Yield();
+                }
+
+                // Frontier 2: Dynamic ELF/PIE Binary Execution from FAT32
+                ProcessLauncher.LaunchElf("/bin/test.pie");
             }
 
             while (true)

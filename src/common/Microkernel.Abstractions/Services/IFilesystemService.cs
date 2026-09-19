@@ -16,5 +16,8 @@ namespace Microkernel.Abstractions.Services
 
         [RpcMethod(4)]
         uint Close(uint fileHandle);
+
+        [RpcMethod(5)]
+        ulong ReadCluster(uint fileHandle, uint clusterIndex, ulong outBufferPhys);
     }
 }

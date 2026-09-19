@@ -83,7 +83,7 @@ fi
 
 NET_ARGS=()
 if [[ "$*" != *"-device virtio-net"* ]]; then
-    NET_ARGS+=("-netdev" "user,id=net0" "-device" "virtio-net-pci,netdev=net0")
+    NET_ARGS+=("-netdev" "user,id=net0,hostfwd=udp::8080-:8080" "-device" "virtio-net-pci,netdev=net0")
 fi
 
 HEADLESS_FLAGS=()

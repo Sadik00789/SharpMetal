@@ -41,7 +41,7 @@ namespace Kernel.Ipc
                 d2 = sender->IpcRegisters.D2;
                 d3 = sender->IpcRegisters.D3;
                 badge = sender->IpcBadge;
-                msgType = IpcMessageHeader.SyncRpc;
+                msgType = sender->IpcMessageInfo != 0 ? sender->IpcMessageInfo : IpcMessageHeader.SyncRpc;
 
                 if (sender->State == ThreadState.BlockedOnReply)
                 {

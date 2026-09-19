@@ -44,6 +44,8 @@ namespace Kernel.Boot
         public static ulong InitrdPhysBase;
         public static ulong InitrdSize;
 
+        public static Endpoint* FsEndpoint;
+
         // Dedicated 16 KiB interrupt stack for TSS.RSP0
         [StructLayout(LayoutKind.Sequential, Size = 16384)]
         private struct InterruptStackBuffer { }
@@ -330,6 +332,9 @@ namespace Kernel.Boot
 
                 EarlySerial.WriteLine("[SLAB] Allocator initialized and verified across size classes.");
 
+                PhysicalFrameRefcount.Initialize();
+                VirtualMemorySpace.InitializeVmm();
+
                 EarlySerial.WriteLine("[STEP 6] Masking 8259 PIC...");
                 Pic8259.MaskAll();
 
@@ -558,6 +563,7 @@ namespace Kernel.Boot
                 rootCNode->Set(10, inputEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xAAAA);
                 // Slot 11: FAT32 Filesystem Service Endpoint Capability
                 Endpoint* fsEp = Endpoint.Create();
+                FsEndpoint = fsEp;
                 rootCNode->Set(11, fsEp, CapabilityType.Endpoint, CapabilityRights.All, badge: 0xBBBB);
                 // Slot 12: VirtIO-Net Service Endpoint Capability
                 Endpoint* netEp = Endpoint.Create();
