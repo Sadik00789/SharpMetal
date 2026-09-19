@@ -456,8 +456,22 @@ namespace FsFat32
 
             for (int i = 0; i < 4096; i++) dst[i] = 0;
 
-            uint clustersPerPage = (ClusterSizeBytes > 0 && ClusterSizeBytes < 4096) ? (4096 / ClusterSizeBytes) : 1;
-            uint clustersToSkip = clusterIndex * clustersPerPage;
+            uint clustersToSkip;
+            uint startSectorInCluster = 0;
+
+            if (ClusterSizeBytes > 0 && ClusterSizeBytes < 4096)
+            {
+                uint clustersPerPage = 4096 / ClusterSizeBytes;
+                clustersToSkip = clusterIndex * clustersPerPage;
+            }
+            else
+            {
+                uint pagesPerCluster = (ClusterSizeBytes >= 4096) ? (ClusterSizeBytes / 4096) : 1;
+                clustersToSkip = clusterIndex / pagesPerCluster;
+                uint pageInCluster = clusterIndex % pagesPerCluster;
+                uint bytesToSkip = pageInCluster * 4096;
+                startSectorInCluster = BytesPerSector > 0 ? (bytesToSkip / BytesPerSector) : 0;
+            }
 
             uint curClus = s_openFiles[fileHandle].StartCluster;
             for (uint i = 0; i < clustersToSkip && curClus >= 2 && curClus < 0x0FFFFFF8; i++)
@@ -468,10 +482,14 @@ namespace FsFat32
             if (curClus < 2 || curClus >= 0x0FFFFFF8) return 0;
 
             ulong bytesRead = 0;
+            bool firstCluster = true;
             while (curClus >= 2 && curClus < 0x0FFFFFF8 && bytesRead < 4096)
             {
                 ulong clusLba = ClusterToLba(curClus);
-                for (uint s = 0; s < SectorsPerCluster && bytesRead < 4096; s++)
+                uint s = firstCluster ? startSectorInCluster : 0;
+                firstCluster = false;
+
+                for (; s < SectorsPerCluster && bytesRead < 4096; s++)
                 {
                     storageClient.ReadBlock(clusLba + s, s_sectorBufPhys);
                     ulong toCopy = 4096 - bytesRead;

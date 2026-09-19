@@ -34,11 +34,10 @@ static inline void sys_yield(void)
 }
 
 static const char s_msg[] = "Hello from ELF\n";
-const char* const p_msg = s_msg;
 
 void _start(void)
 {
-    sys_write(1, p_msg, sizeof(s_msg) - 1);
+    sys_write(1, s_msg, sizeof(s_msg) - 1);
 
     // Wait for keypress via SYS_read without starving the system
     char c = 0;

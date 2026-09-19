@@ -60,6 +60,8 @@ def main():
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         bufsize=1
     )
 
@@ -79,6 +81,9 @@ def main():
         if not line and proc.poll() is not None:
             break
         if line:
+            if "\ufffd" in line:
+                sys.stderr.write("[warn] non-UTF-8 serial byte replaced: "
+                                 + ascii(line.rstrip("\n")) + "\n")
             sys.stdout.write(line)
             sys.stdout.flush()
             output_buffer += line
