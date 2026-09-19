@@ -137,6 +137,18 @@ namespace Userland.Runtime.ZeroAlloc.Interop
             return Syscall(SyscallNumbers.SysAllocDma, sizeBytes, virtAddr, 0, 0, 0, 0);
         }
 
+        /// <summary>
+        /// Reports the PTE flags for <paramref name="virtAddr"/> and, when
+        /// <paramref name="setUncacheable"/> is true, switches the mapping to
+        /// uncacheable (PCD|PWT) and flushes its TLB entry. Used to make DMA
+        /// rings explicitly coherent on real hardware.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong DmaCoherent(ulong virtAddr, bool setUncacheable)
+        {
+            return Syscall(SyscallNumbers.SysDmaCoherent, virtAddr, setUncacheable ? 1UL : 0UL, 0, 0, 0, 0);
+        }
+
         // Architectural correction #1: Ring3/Ring0 boundary — shell never maps
         // pages or inserts TCBs. Kernel creates the address space + stacks + TCB.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -168,6 +180,12 @@ namespace Userland.Runtime.ZeroAlloc.Interop
         public static ulong Brk(ulong newBrk)
         {
             return Syscall(SyscallNumbers.SysBrk, newBrk, 0, 0, 0, 0, 0);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong SetAbi(int mode)
+        {
+            return Syscall(SyscallNumbers.SysSetAbi, (ulong)mode, 0, 0, 0, 0, 0);
         }
     }
 }

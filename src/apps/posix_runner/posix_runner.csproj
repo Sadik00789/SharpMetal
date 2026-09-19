@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <Import Project="../../../build/config/UserlandApp.props" />
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <AssemblyName>posix_runner</AssemblyName>
+    <RootNamespace>PosixRunner</RootNamespace>
+    <NoStdLib>true</NoStdLib>
+    <TargetFramework>net10.0</TargetFramework>
+    <NoWarn>$(NoWarn);CS0436;CS8600;CS8632</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../../common/MiniCoreLib/MiniCoreLib.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+    <ProjectReference Include="../../runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+    <ProjectReference Include="../../runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" />
+    <ProjectReference Include="../../common/Microkernel.Vfs/Microkernel.Vfs.csproj" />
+    <ProjectReference Include="../../runtime/Userland.PieLoader/Userland.PieLoader.csproj" />
+    <ProjectReference Include="../../libs/Microkernel.Posix/Microkernel.Posix.csproj" />
+  </ItemGroup>
+</Project>

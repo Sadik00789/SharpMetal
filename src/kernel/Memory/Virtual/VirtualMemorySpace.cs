@@ -367,7 +367,7 @@ namespace Kernel.Memory.Virtual
             // LAPIC/IOAPIC aliasing is discouraged (see userland MmioMapper
             // advisory deny) but permitted here because input.hid performs
             // EOI via direct LAPIC mapping on this platform.
-            if (alignedVirt == 0x25000000UL)
+            if (alignedVirt == 0x25000000UL || alignedVirt == 0x25100000UL || alignedVirt == 0x26000000UL || DmaArenaAllocator.ValidateRange(alignedPhys, alignedSize))
             {
                 flags &= ~Paging.CacheDisable;
             }
@@ -378,7 +378,7 @@ namespace Kernel.Memory.Virtual
                 if (pagePhys < 0x100000UL) return false;
                 if (IsManagedConventionalRam(pagePhys))
                 {
-                    if (alignedVirt != 0x25000000UL) return false;
+                    if (alignedVirt != 0x25000000UL && alignedVirt != 0x25100000UL && alignedVirt != 0x26000000UL && !DmaArenaAllocator.ValidateRange(pagePhys, 4096)) return false;
                 }
             }
 

@@ -25,6 +25,7 @@ build/iso/
 *.img
 *.iso
 *.log
+*.flag
 qemu.log
 
 # --- IDE & Editor Specific ---
@@ -35,6 +36,7 @@ qemu.log
 *.suo
 *.userprefs
 *.sln.docstates
+plans/
 
 # --- Python Intermediates ---
 __pycache__/

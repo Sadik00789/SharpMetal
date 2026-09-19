@@ -33,5 +33,11 @@ namespace Microkernel.Abstractions.Syscalls
         // POSIX / I/O primitives
         public const ulong SysRead    = 0x24;
         public const ulong SysWrite   = 0x25;
+        public const ulong SysSetAbi  = 0x26;
+
+        // DMA cache-coherence control: sys_dma_coherent(virtAddr, setUc)
+        // Returns the PTE flag bits for virtAddr; when setUc != 0 the PTE is
+        // switched to uncacheable (PCD|PWT) and the TLB entry is flushed.
+        public const ulong SysDmaCoherent = 0x0D;
     }
 }

@@ -83,6 +83,9 @@ dotnet build "${REPO_ROOT}/src/servers/drivers/storage.nvme/storage.nvme.csproj"
 echo "[BUILD] Compiling input.hid IL..."
 dotnet build "${REPO_ROOT}/src/servers/drivers/input.hid/input.hid.csproj" -c Release
 
+echo "[BUILD] Compiling bus.xhci IL..."
+dotnet build "${REPO_ROOT}/src/servers/drivers/bus.xhci/bus.xhci.csproj" -c Release
+
 echo "[BUILD] Compiling net.stack IL..."
 dotnet build "${REPO_ROOT}/src/servers/net.stack/net.stack.csproj" -c Release
 mkdir -p "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}"
@@ -100,6 +103,12 @@ dotnet build "${REPO_ROOT}/src/servers/fs.fat32/fs.fat32.csproj" -c Release
 
 echo "[BUILD] Compiling shell IL..."
 dotnet build "${REPO_ROOT}/src/apps/shell/shell.csproj" -c Release
+
+echo "[BUILD] Compiling Microkernel.Posix IL..."
+dotnet build "${REPO_ROOT}/src/libs/Microkernel.Posix/Microkernel.Posix.csproj" -c Release
+
+echo "[BUILD] Compiling posix_runner IL..."
+dotnet build "${REPO_ROOT}/src/apps/posix_runner/posix_runner.csproj" -c Release
 
 echo "[BUILD] Compiling Kernel IL..."
 dotnet build "${REPO_ROOT}/src/kernel/Kernel.csproj" -c Release
@@ -360,6 +369,39 @@ lld-link \
 cp "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.exe" \
    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin"
 
+echo "[AOT] Compiling bus.xhci via Native AOT (ilc)..."
+"$ILC" \
+    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -o "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.obj" \
+    --targetos windows \
+    --targetarch x64 \
+    --systemmodule MiniCoreLib \
+    --nativelib \
+    --directpinvoke:Syscall \
+    --directpinvoke:Mfence
+
+echo "[NASM] Assembling XhciEntry.asm..."
+nasm -f win64 "${REPO_ROOT}/src/servers/drivers/bus.xhci/XhciEntry.asm" \
+    -o "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/XhciEntry.obj"
+
+echo "[LINK] Linking bus.xhci.exe via lld-link..."
+lld-link \
+    /align:4096 \
+    /filealign:4096 \
+    /nodefaultlib \
+    /subsystem:console \
+    /entry:XhciEntry \
+    /base:0x40000000 \
+    /out:"${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.exe" \
+    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/XhciEntry.obj" \
+    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.obj"
+
+cp "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.exe" \
+   "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.bin"
+
 echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
 "$ILC" \
     "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.dll" \
@@ -470,6 +512,42 @@ lld-link \
 
 cp "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.exe" \
    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin"
+
+echo "[AOT] Compiling posix_runner via Native AOT (ilc)..."
+"$ILC" \
+    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.dll" \
+    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
+    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
+    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
+    -r "${REPO_ROOT}/src/libs/Microkernel.Posix/bin/x64/Release/${TFM}/Microkernel.Posix.dll" \
+    -o "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.obj" \
+    --targetos windows \
+    --targetarch x64 \
+    --systemmodule MiniCoreLib \
+    --nativelib \
+    --directpinvoke:Syscall
+
+echo "[NASM] Assembling posix_runner Crt0.asm..."
+nasm -f win64 "${REPO_ROOT}/src/apps/posix_runner/Crt0.asm" \
+    -o "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/Crt0.obj"
+
+echo "[LINK] Linking posix_runner.exe via lld-link..."
+lld-link \
+    /align:4096 \
+    /filealign:4096 \
+    /nodefaultlib \
+    /subsystem:console \
+    /entry:PosixRunnerEntry \
+    /base:0x20000000 \
+    /out:"${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.exe" \
+    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/Crt0.obj" \
+    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.obj"
+
+cp "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.exe" \
+   "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
 
 echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
 "$ILC" \
@@ -585,6 +663,18 @@ cp "${REPO_ROOT}/build/BOOTX64.EFI" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 echo '\EFI\BOOT\BOOTX64.EFI' > "${ESP_DIR}/startup.nsh"
 
 echo "[PACK] Packaging initial ramdisk (INITRD.IMG)..."
+# Opt-in flag: roottask only spawns bus.xhci when this entry is present (or
+# when running under a hypervisor). It is packed ONLY for CI runs
+# (XHCI_NATIVE=1) so bare-metal media never opt in and keep BIOS legacy.
+XHCI_FLAG_ARGS=()
+if [ "${XHCI_NATIVE:-0}" = "1" ]; then
+    printf "1" > "${REPO_ROOT}/build/xhci_native.flag"
+    XHCI_FLAG_ARGS+=("xhci_native.flag=${REPO_ROOT}/build/xhci_native.flag")
+    echo "[PACK] XHCI_NATIVE=1: packing xhci_native.flag (native xHCI opt-in)"
+else
+    rm -f "${REPO_ROOT}/build/xhci_native.flag"
+    echo "[PACK] Native xHCI opt-in disabled: not packing xhci_native.flag"
+fi
 python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
     "${ESP_DIR}/EFI/BOOT/INITRD.IMG" \
     roottask="${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin" \
@@ -593,9 +683,12 @@ python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
     supervisor.bin="${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin" \
     storage.nvme.bin="${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin" \
     input.hid.bin="${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin" \
+    bus.xhci.bin="${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.bin" \
+    ${XHCI_FLAG_ARGS[@]+"${XHCI_FLAG_ARGS[@]}"} \
     net.virtio.bin="${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin" \
     fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin" \
-    shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin"
+    shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin" \
+    posix_runner.bin="${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
 
 # Constraint 1: Rootless FAT32 Disk Staging
 NVME_IMG="${REPO_ROOT}/build/nvme.img"
@@ -614,6 +707,25 @@ mmd -i "${NVME_IMG}" ::/bin || true
 mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/test.pie
 mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/elftest.pie
 mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/test.pie
+
+echo "[POSIX] Compiling freestanding static PIE hello_world.c..."
+TMP_HELLO_PIE="${TMP_DIR}/hello.pie"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_HELLO_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/hello_world.c"
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/hello.pie
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix.pie
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix_test
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/hello.pie
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/posix.pie
+mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/posix_test
+
+echo "[POSIX] Compiling freestanding static PIE cat.c..."
+TMP_CAT_PIE="${TMP_DIR}/cat.pie"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_CAT_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/cat.c"
+mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/bin/cat.pie
+mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/cat.pie
+
+mcopy -i "${NVME_IMG}" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/bin/posix_runner || true
+mcopy -i "${NVME_IMG}" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/posix_runner.bin || true
 
 # Build raw GPT disk image with FAT32 ESP
 DISK_IMG="${REPO_ROOT}/build/disk.img"

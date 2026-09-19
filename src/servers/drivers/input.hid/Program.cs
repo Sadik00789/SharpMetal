@@ -10,11 +10,19 @@ namespace InputHid
     {
         public uint ReadKey()
         {
-            // 1. Check PS/2 Keyboard (both built-in keyboard and USB keyboard via SMM legacy emulation)
-            uint key = Ps2Keyboard.ReadKey();
+            // 1. Injected USB HID queue (populated by bus.xhci via InjectKey).
+            //    Checked first so a working USB keyboard always wins over the
+            //    BIOS legacy emulation path.
+            uint key = UsbKeyQueue.Dequeue();
             if (key != 0) return key;
 
-            // 2. Check COM1 Serial Port (0x3F8) if character is waiting (e.g. QEMU / serial console)
+            // 2. PS/2 Keyboard (built-in, or USB keyboard via SMM legacy emulation).
+            //    This remains the fallback while the xHCI fail-safe handoff is in
+            //    progress or if it aborts.
+            key = Ps2Keyboard.ReadKey();
+            if (key != 0) return key;
+
+            // 3. Check COM1 Serial Port (0x3F8) if character is waiting (e.g. QEMU / serial console)
             if (HasSerialInput())
             {
                 byte c = Ps2Keyboard.PortIn8(0x3F8);
@@ -22,6 +30,17 @@ namespace InputHid
                 if (c != 0) return c;
             }
 
+            return 0;
+        }
+
+        /// <summary>
+        /// Enqueues a translated key code produced by the USB HID driver.
+        /// Non-blocking and allocation-free; returns 0 on success.
+        /// </summary>
+        public uint InjectKey(uint keyCode)
+        {
+            if (keyCode == 0) return 0;
+            UsbKeyQueue.Enqueue(keyCode);
             return 0;
         }
 

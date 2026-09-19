@@ -7,6 +7,7 @@
 [![Runtime](https://img.shields.io/badge/.NET%2010%20LTS-Native%20AOT%20Freestanding-512BD4.svg)](https://learn.microsoft.com/en-us/dotnet/core/deploying/native-aot/)
 [![Firmware](https://img.shields.io/badge/Firmware-UEFI%202.x%20Direct-brightgreen.svg)](https://uefi.org/)
 [![IPC](https://img.shields.io/badge/IPC-Capability--Based%20%28seL4--Style%29-orange.svg)]()
+[![POSIX](https://img.shields.io/badge/POSIX-Linux%20x86--64%20ABI%20Emulation-ff69b4.svg)]()
 [![SIMD](https://img.shields.io/badge/Compositor-AVX2%20256--bit-yellowgreen.svg)]()
 [![Storage](https://img.shields.io/badge/Driver-NVMe%20Direct%20DMA-red.svg)]()
 [![Filesystem](https://img.shields.io/badge/Filesystem-FAT32%20VFS-blueviolet.svg)]()
@@ -14,7 +15,7 @@
 
 A high-performance, capability-based bare-metal operating system microkernel and multi-server userland written entirely in **C# using Native AOT compilation**, targeting modern 64-bit x86-64 hardware without any dependencies on the standard runtime (CoreCLR), glibc, or external bootloaders.
 
-The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
+The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, native xHCI USB HID keyboard control, zero-dependency **kernel-side Linux x86-64 POSIX syscall emulation** allowing standard static Linux PIE binaries to execute in unprivileged Ring 3, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="SharpMetal Microkernel Boot and Interactive Shell Demo" width="800" />
@@ -28,10 +29,13 @@ The system boots directly from UEFI firmware into higher-half virtual memory, en
 graph TD
     subgraph Ring3_Userland ["Ring 3: Isolated Userland Processes (CPL = 3)"]
         Shell["apps/shell<br/><i>Micro-GC Runtime | PSF2 Text Grid | History</i>"]
+        PosixRunner["apps/posix_runner<br/><i>Linux PIE Host | System V Stack</i>"]
+        LinuxPIE["Linux x86-64 PIEs<br/><i>hello.pie | cat.pie | posix_test</i>"]
         StorageDriver["storage.nvme<br/><i>ZeroAlloc Runtime | SPSC DMA Queues</i>"]
         Fat32Server["fs.fat32<br/><i>ZeroAlloc Runtime | BPB & Cluster Chains</i>"]
         NetDriver["net.virtio<br/><i>ZeroAlloc Runtime | Modern PCIe Capabilities</i>"]
-        InputDriver["input.hid<br/><i>ZeroAlloc Runtime | PS/2 ANSI Translation</i>"]
+        XhciDriver["bus.xhci<br/><i>ZeroAlloc Runtime | Native xHCI & USB HID</i>"]
+        InputDriver["input.hid<br/><i>ZeroAlloc Runtime | PS/2 & USB ANSI Translation</i>"]
         DisplayServer["display_server<br/><i>AVX2 Vector Blitter | Alpha Blending</i>"]
         PciServer["pci_server<br/><i>PCIe ECAM Discovery | FLR | MSI/MSI-X</i>"]
         Supervisor["supervisor<br/><i>Watchdog | Fault Reincarnation</i>"]
@@ -43,10 +47,11 @@ graph TD
     end
 
     subgraph Ring0_Kernel ["Ring 0: Higher-Half C# Microkernel (CPL = 0)"]
-        SyscallDispatcher["Hardware SYSCALL/SYSRET Engine"]
+        SyscallDispatcher["Hardware SYSCALL/SYSRET Engine<br/><i>Dual-ABI: SharpMetal + Linux x86-64</i>"]
+        PosixEmulation["POSIX Syscall Multiplexer & Static BSS FD Table"]
         CSpace["seL4-Style Capability Space (CNode / CSpace / CDT)"]
         Scheduler["Preemptive MLFQ Scheduler & Timeslice Donation"]
-        Paging["4-Level Paging (PML4) & HHDM (0xFFFF_8000_0000_0000)"]
+        Paging["4-Level Paging (PML4) & HHDM & Demand Paging / COW"]
         MemoryAlloc["Slab Allocator (Kmem) & PMM Bitmap & DMA Arena"]
         Arch["GDT, IDT (256 Gates), TSS (RSP0 Stack Isolation), LAPIC, PAT"]
     end
@@ -56,6 +61,7 @@ graph TD
         GOP["UEFI Graphics Output Protocol (GOP FB)"]
         NVMeHW["PCIe NVMe Block Device (Direct DMA / MSI Vector 0x30)"]
         NetHW["VirtIO-Net PCIe Controller (MSI Vector 0x31)"]
+        XhciHW["xHCI USB 3.0 Controller & USB Keyboard (Vector 0x32)"]
         KBHW["PS/2 Keyboard Controller (Port 0x60/0x64)"]
         PCIeECAM["PCIe ECAM Memory-Mapped Config Space"]
     end
@@ -63,6 +69,9 @@ graph TD
     Shell -->|RegisterSurface / CommitSurface| DisplayServer
     Shell -->|ReadAllText / ReadAllBytes| Fat32Server
     Shell -->|SendPacket / ReceivePacket| NetDriver
+    Shell -->|exec /bin/...| PosixRunner
+    PosixRunner -->|JumpToPie / SysSetAbi| LinuxPIE
+    LinuxPIE <-->|Linux x86-64 Syscalls| PosixEmulation
     Fat32Server -->|ReadBlock / WriteBlock| StorageDriver
     Shell -->|Enumerate Topology| PciServer
     Supervisor -->|FLR Reset / Reincarnate| PciServer
@@ -70,6 +79,7 @@ graph TD
     Roottask -->|Spawn / Synthesize CSpace| Ring3_Userland
 
     Ring3_Userland <-->|FastPath SYSCALL| SyscallDispatcher
+    SyscallDispatcher --> PosixEmulation
     SyscallDispatcher --> CSpace
     SyscallDispatcher --> Scheduler
     SyscallDispatcher --> Paging
@@ -79,6 +89,7 @@ graph TD
     DisplayServer --> GOP
     StorageDriver --> NVMeHW
     NetDriver --> NetHW
+    XhciDriver --> XhciHW
     InputDriver --> KBHW
     PciServer --> PCIeECAM
 ```
@@ -123,6 +134,8 @@ baremetal-csharp-microkernel/
 │   └── assets/                     # Demo animation GIF and visual documentation assets
 ├── src/
 │   ├── apps/
+│   │   ├── frontier_tests/         # Freestanding C static PIE benchmarks (hello_world.c, cat.c, ElfTest.c)
+│   │   ├── posix_runner/           # Layer 10: Userland Linux PIE host & System V stack synthesizer
 │   │   └── shell/                  # Layer 12: Interactive graphic terminal shell (Micro-GC)
 │   ├── common/
 │   │   ├── Microkernel.Abstractions/ # Syscall numbers, RPC contracts, capability definitions
@@ -138,9 +151,11 @@ baremetal-csharp-microkernel/
 │   │   ├── Diagnostics/            # 16550 UART early serial logger
 │   │   ├── Ipc/                    # Synchronous rendezvous, FastPath IPC, SyscallDispatcher
 │   │   ├── Memory/                 # PMM bitmap, 4-level paging, HHDM, DMA arena, Slab allocator
+│   │   ├── Posix/                  # Layer 4: Kernel Linux syscall dispatcher & static BSS FD table
 │   │   └── Scheduling/             # Preemptive MLFQ scheduler, TCB, context switching
 │   ├── libs/
 │   │   ├── Microkernel.Drawing/    # ARGB32 surface blitter, PSF2 font rasterization, alpha blend
+│   │   ├── Microkernel.Posix/      # System V AMD64 stack layout builder & Linux ABI constants
 │   │   └── Microkernel.Sdk/        # Userland IPC channels and namespace resolution
 │   ├── runtime/
 │   │   ├── Userland.PieLoader/     # Relocatable position-independent executable (PIE/PE/ELF) loader
@@ -149,7 +164,8 @@ baremetal-csharp-microkernel/
 │   └── servers/                    # Ring 3 Isolated System Servers
 │       ├── display_server/         # Layer 12: AVX2 hardware framebuffer compositor & dirty clipper
 │       ├── drivers/
-│       │   ├── input.hid/          # Layer 10: PS/2 keyboard driver & ANSI escape sequence translator
+│       │   ├── bus.xhci/           # Layer 9: Native PCIe xHCI USB 3.0 host controller & USB HID keyboard
+│       │   ├── input.hid/          # Layer 10: PS/2 & USB keyboard driver & ANSI escape sequence translator
 │       │   ├── net.virtio/         # Layer 9: VirtIO-Net modern PCIe controller driver
 │       │   └── storage.nvme/       # Layer 9: High-throughput NVMe DMA storage driver
 │       ├── fs.fat32/               # Layer 10: Ring 3 FAT32 filesystem server
@@ -236,6 +252,14 @@ To guarantee rock-solid privilege transitions into userland:
 - **Atomic 16-Byte Stack Alignment**: In `SyscallEntry.asm`, user `RSP` is swapped to thread-local kernel stack `[gs:16]` and aligned via `and rsp, -16`. This prevents 16-byte alignment traps (`#GP(0)`) on vector instructions (`movaps`) within Native AOT compiled kernel C# routines.
 - **Hardware Selector Arithmetic**: Explicit descriptors `UserDsSelector = 0x1B` (offset `0x18 | 3`) and `UserCsSelector = 0x23` (offset `0x20 | 3`) align with `IA32_STAR[63:48] = 0x0010`, ensuring `sysretq` computes target selectors `STAR[63:48] + 16` (`0x20 | 3 = 0x23`) and `STAR[63:48] + 8` (`0x18 | 3 = 0x1B`).
 - **GPR Scrubbing**: All general-purpose registers (`RAX`–`R15`) are zeroed prior to `iretq` execution to prevent kernel address and data leaks into Ring 3.
+
+### 9. Linux x86-64 ABI Emulation & POSIX Compatibility Layer
+Because the x86-64 `syscall` instruction unconditionally transitions to Ring 0 via `IA32_LSTAR`, standard static Linux binaries cannot be intercepted in userland without hypervisor overhead. SharpMetal implements a zero-dependency kernel-native dual-ABI architecture:
+- **Per-Thread ABI Switching (`ThreadControlBlock.AbiMode`)**: Each TCB holds `public int AbiMode` (0 = SharpMetal native, 1 = Linux x86-64) at offset 244, adjusting padding to strictly preserve the 64-byte alignment of `FpuState` at offset 256 (0x100). Microkernel syscall `SysSetAbi = 0x26` transitions calling threads dynamically.
+- **Dynamic Register Demultiplexing**: Linux System V AMD64 syscall conventions place the 5th and 6th arguments in `r8` and `r9`, while SharpMetal uses `r12` and `r13`. `SyscallEntry.asm` inspects `AbiMode` and conditionally routes user `r8`/`r9` from the kernel spill frame to `[rsp+40]` and `[rsp+48]`, preventing register clobbering.
+- **Static BSS Zero-GC File Descriptor Table (`PosixFdTable`)**: Manages per-process descriptors (stdin 0, stdout 1, stderr 2, and dynamic VFS/socket descriptors up to 32 FDs across 64 processes) entirely within static BSS storage with zero kernel GC heap allocations.
+- **Non-Deadlocking Bounded Read**: `SYS_read` on fd 0 polls the `InputService` (cptr 10) and COM1 UART with interrupts explicitly unmasked (`Cpu.EnableInterrupts()`) and cooperative yielding (`Scheduler.Yield()`), safely returning `-EAGAIN` (-11) upon timeout.
+- **Freestanding Userland Host (`posix_runner`)**: Stages static Linux PIE ELFs from FAT32 into user memory (`0x40000000`), synthesizes standard System V initial stack frames (`argc`, `argv`, `envp`, `auxv` canary with `AT_ENTRY`, `AT_PHDR`, `AT_PAGESZ`, `AT_RANDOM`), issues `SysSetAbi(1)`, scrubs registers, and branches to `_start`.
 
 ---
 
@@ -344,7 +368,7 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 | `pci` | Enumerate PCIe ECAM devices | Scans buses 0..3 and lists discovered Host Bridges, Display Controllers, and NVMe drives |
 | `nvme` | Execute NVMe benchmark | Performs verified block write and read to LBA 65535 with canary validation (`0xA55A1234`) |
 | `cat <file>` | Read file via VFS | Uses `System.IO.File.ReadAllText` over IPC to read and display FAT32 filesystem contents (e.g. `cat /HELLO.TXT`) |
-| `exec <path>` | Load PIE binary from FAT32 and spawn Ring 3 process | Stages the PE image via `PieRelocator.LoadAndRelocateFromVfs` (`File.ReadAllBytes` + section copy + `IMAGE_REL_BASED_DIR64` relocation) then Ring-0 `SysSpawn (0x0B)` synthesizes an isolated address space, 64KB user stack at `0x7FFFFFF00000`, 16KB kernel stack (`TSS.RSP0`), root CNode caps, `RIP=Entry/CS=0x23/SS=0x1B/RFLAGS=0x202` (e.g. `exec /HELLO.BIN`) |
+| `exec <path>` | Load PIE binary from FAT32 and spawn Ring 3 process | Stages PE image or static Linux x86-64 ELF PIE via `posix_runner`. Ring-0 `SysSpawn (0x0B)` / `SysSetAbi (0x26)` synthesizes isolated address space, System V ABI stack with argc/argv/envp/auxv, root CNode caps, and dual-ABI syscall dispatch (e.g. `exec /HELLO.BIN`, `exec /bin/posix_test`, `exec /bin/cat.pie`). |
 | `net` | VirtIO-Net TX benchmark | Builds a 64-byte Ethernet broadcast frame (EtherType `0x88B5`) and transmits via split virtqueue descriptor staging |
 | `caps` | Inspect CSpace capability slots | Lists all root CNode slots and assigned access rights |
 | `ps` | Display process thread table | Displays active thread IDs, execution states, and priority levels |
@@ -355,7 +379,7 @@ Upon completing initialization, `apps/shell` registers an ARGB32 console surface
 
 ## Verification & Test Results
 
-The headless test harness confirms operational integrity across all 12 microkernel layers and active SMP cores (demonstrated with 4 vCPUs in default CI harness):
+The headless test harness confirms operational integrity across all microkernel layers, dynamic ELF loading, VMM demand paging/COW, VirtIO-Net, xHCI USB, and Linux x86-64 POSIX emulation across active SMP cores (demonstrated with 4 vCPUs in default CI harness):
 
 ```
 =================================================================
@@ -366,7 +390,7 @@ The headless test harness confirms operational integrity across all 12 microkern
 [SMP] 4 cores synchronized and operational.
 [PASS] Concurrent zero-alloc physical frame stress test succeeded.
 [PASS] Broadcast IPI TLB shootdown verified across all active cores.
-[ROOTTASK] Initial root CNode initialized with 10 core capabilities.
+[ROOTTASK] Initial root CNode initialized with 15 core capabilities.
 [PCI] Scanning PCIe ECAM bus topology...
 [SUPERVISOR] Registered services: pci_server, display_server.
 [SUPERVISOR] Simulating driver fault and recovery cycle...
@@ -378,14 +402,24 @@ The headless test harness confirms operational integrity across all 12 microkern
 [NVME] Verified block write to LBA 65535 (Canary: 0xA55A1234).
 [NVME] Verified block read from LBA 65535 matches canary.
 [NVME] Block I/O benchmark passed (Write & Read Verified).
-[DISPLAY] AVX2 software compositor initialized. Framebuffer cleared.
 [FAT32] Volume mounted. Found root directory entry: HELLO.TXT
 [VIRTIO-NET] Modern PCI VirtIO Network device detected.
-[VIRTIO] VirtIO-Net controller online. MAC: 00:00:00:00:00:00
-[DISPLAY] RegisterSurface invoked.
-[DISPLAY] Client surface mapped.
+[VIRTIO] VirtIO-Net controller online. MAC: 52:54:00:12:34:56
+[PASS] VMM: Demand paging resolved fault at 0x0000000040002EE8
+[PASS] COW: Frame duplicated on write at 0x0000000040003000
+[ROOTTASK] Spawning ELF process: /bin/test.pie
+[PASS] ELF: /bin/test.pie relocated and entry executed
+Hello from ELF
+[NET] RX Virtqueue replenished with 16 descriptors.
+[PASS] NET: VirtIO RX/TX loopback / ICMP processed
+[PASS] XHCI: Controller initialized and USB keyboard addressed
 [SHELL] History ring buffer initialized (32 slots).
 [SHELL] SharpMetal Bare-Metal Shell online.
+[SHELL] Executing command: 'exec' -> spawn complete.
+[POSIX_RUNNER] Hosting PIE binary: /bin/posix_test
+[POSIX_RUNNER] Jumping to PIE entry point at 0x400002E4...
+Hello from POSIX
+[PASS] POSIX: SYS_write and SYS_read executed successfully
 
 [+] All boot milestones successfully verified.
 ```

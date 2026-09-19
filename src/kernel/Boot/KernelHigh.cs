@@ -576,8 +576,15 @@ namespace Kernel.Boot
                 Notification* netNotif = Notification.Create();
                 InterruptDispatcher.RegisterVector(0x31, netNotif, badge: 0x31);
                 rootCNode->Set(14, netNotif, CapabilityType.Notification, CapabilityRights.All, badge: 0x31);
+                // Slot 15: xHCI IRQ Notification Capability (Vector 0x32)
+                // bus.xhci blocks in sys_recv_any on this slot. EOI for vector 0x32
+                // is performed by InterruptDispatcher.DispatchInterrupt, never by
+                // the driver, to avoid double-acknowledging in-service IRQs.
+                Notification* xhciNotif = Notification.Create();
+                InterruptDispatcher.RegisterVector(0x32, xhciNotif, badge: 0x32);
+                rootCNode->Set(15, xhciNotif, CapabilityType.Notification, CapabilityRights.All, badge: 0x32);
 
-                EarlySerial.WriteLine("[ROOTTASK] Initial root CNode initialized with 10 core capabilities.");
+                EarlySerial.WriteLine("[ROOTTASK] Initial root CNode initialized with 15 core capabilities.");
 
                 // 4. Synthesize roottask thread
                 ThreadControlBlock* roottaskTcb = Scheduler.CreateThread(null, 0, enqueue: false);

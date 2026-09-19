@@ -75,6 +75,24 @@ namespace Shell
             }
         }
 
+        public void WriteHex(byte b)
+        {
+            const string hex = "0123456789ABCDEF";
+            WriteChar(hex[(b >> 4) & 0xF]);
+            WriteChar(hex[b & 0xF]);
+        }
+
+        public void WriteHex(ulong val)
+        {
+            WriteString("0x");
+            for (int i = 60; i >= 0; i -= 4)
+            {
+                byte nibble = (byte)((val >> i) & 0xF);
+                char c = (char)(nibble < 10 ? ('0' + nibble) : ('A' + (nibble - 10)));
+                WriteChar(c);
+            }
+        }
+
         public void ScrollUp()
         {
             // Shift rows up by 1

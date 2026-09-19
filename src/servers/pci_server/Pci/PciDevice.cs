@@ -11,9 +11,11 @@ namespace PciServer.Pci
         public ushort DeviceId;
         public byte BaseClass;
         public byte SubClass;
+        public byte ProgIf;
         public ulong ConfigVirtAddress;
         public byte MsiOffset;
         public byte MsiXOffset;
         public ulong Bar0;
+        public ulong XhciBar0;
     }
 }

@@ -136,6 +136,7 @@ namespace Roottask
             byte* supPayload = null; ulong supSize = 0;
             byte* nvmePayload = null; ulong nvmeSize = 0;
             byte* inputPayload = null; ulong inputSize = 0;
+            byte* xhciPayload = null; ulong xhciSize = 0;
             byte* netPayload = null; ulong netSize = 0;
             byte* fsPayload = null; ulong fsSize = 0;
             byte* shellPayload = null; ulong shellSize = 0;
@@ -145,6 +146,7 @@ namespace Roottask
             bool hasSupervisor = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "supervisor.bin", out supPayload, out supSize);
             bool hasNvme = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "storage.nvme.bin", out nvmePayload, out nvmeSize);
             bool hasInput = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "input.hid.bin", out inputPayload, out inputSize);
+            bool hasXhci = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "bus.xhci.bin", out xhciPayload, out xhciSize);
             bool hasNet = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "net.virtio.bin", out netPayload, out netSize);
             bool hasFs = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "fs.fat32.bin", out fsPayload, out fsSize);
             bool hasShell = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize, "shell.bin", out shellPayload, out shellSize);
@@ -168,6 +170,21 @@ namespace Roottask
                 SyscallWrappers.CreateProcess((ulong)supPayload, supSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)nvmePayload, nvmeSize, 0x0000000040000000UL, 1);
                 SyscallWrappers.CreateProcess((ulong)inputPayload, inputSize, 0x0000000040000000UL, 1);
+                // Only take over the controller when the native driver can
+                // actually drive it: under a hypervisor (QEMU CI) or when the
+                // boot medium explicitly opts in via xhci_native.flag. Bare
+                // metal typically lacks the flag, so bus.xhci never spawns and
+                // the firmware's PS/2 legacy emulation for the external USB
+                // keyboard stays intact instead of being dropped for nothing.
+                byte* flagPayload = null;
+                ulong flagSize = 0;
+                bool flagPresent = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize,
+                    "xhci_native.flag", out flagPayload, out flagSize);
+                bool nativeXhci = (bootInfo.IsHypervisor != 0) || flagPresent;
+                if (hasXhci && nativeXhci)
+                {
+                    SyscallWrappers.CreateProcess((ulong)xhciPayload, xhciSize, 0x0000000040000000UL, 1);
+                }
                 if (hasNet)
                 {
                     SyscallWrappers.CreateProcess((ulong)netPayload, netSize, 0x0000000040000000UL, 1);

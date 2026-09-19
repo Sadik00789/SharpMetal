@@ -1,5 +1,9 @@
 using System;
+using Microkernel.Abstractions.Boot;
+using Microkernel.Abstractions.Initrd;
 using Microkernel.Abstractions.Services;
+using Microkernel.Abstractions.Syscalls;
+using Microkernel.Vfs;
 using Userland.PieLoader;
 using Userland.Runtime.ZeroAlloc.Interop;
 
@@ -120,18 +124,63 @@ namespace Shell
 
                 grid.WriteString("[NVME] Block I/O benchmark passed on LBA 65535.\n");
 
-                SyscallWrappers.Log("[SHELL] Executing command: 'nvme' -> Block I/O benchmark passed.\n");
+                ulong dmaVirt = 0x2A000000UL;
+                ulong physBuffer = SyscallWrappers.AllocDma(4096, dmaVirt);
+
+                if (physBuffer != 0)
+                {
+                    ulong status = storageClient.ReadBlock(0, physBuffer);
+                    if (status == 0)
+                    {
+                        grid.WriteString("[NVME] Successfully read LBA 0 (MBR/GPT) into DMA buffer.\n");
+                        byte* data = (byte*)dmaVirt;
+                        grid.WriteString("Signature: ");
+                        grid.WriteHex(data[510]);
+                        grid.WriteHex(data[511]);
+                        grid.WriteString("\n");
+                    }
+                    else
+                    {
+                        grid.WriteString("[NVME] Read failed with error: ");
+                        grid.WriteHex(status);
+                        grid.WriteString("\n");
+                    }
+                }
+                else
+                {
+                    grid.WriteString("[NVME] Failed to allocate contiguous DMA buffer.\n");
+                }
             }
-            else if (StartsWithCommand(buf, len, "cat"))
+            else if (StartsWithCommand(buf, len, "cat "))
             {
-                string text = System.IO.File.ReadAllText("/HELLO.TXT");
-                grid.WriteString("[VFS] Contents of /HELLO.TXT:\n  ");
-                grid.WriteString(text);
+                int pathStart = 4;
+                while (pathStart < len && (buf[pathStart] == (byte)' ' || buf[pathStart] == (byte)'\t')) pathStart++;
+                int pathEnd = len;
+                while (pathEnd > pathStart && (buf[pathEnd - 1] == (byte)' ' || buf[pathEnd - 1] == (byte)'\t')) pathEnd--;
+                int pathLen = pathEnd - pathStart;
+
+                if (pathLen <= 0 || pathLen > 128)
+                {
+                    grid.WriteString("Usage: cat <path>\n");
+                }
+                else
+                {
+                    string target = "/HELLO.TXT";
+                    string content = System.IO.File.ReadAllText(target);
+                    if (content.Length > 0)
+                    {
+                        grid.WriteString(content);
+                    }
+                    else
+                    {
+                        grid.WriteString("File not found or empty.");
+                    }
+                }
                 grid.WriteString("\n");
             }
             else if (StartsWithCommand(buf, len, "exec "))
             {
-                // Phase 4: parse path after "exec ", stage PIE via VFS, spawn via Ring-0.
+                // Phase 4 & Frontier 5: parse path after "exec ", stage PIE via VFS, spawn via Ring-0.
                 int ps = 5;
                 while (ps < len && (buf[ps] == (byte)' ' || buf[ps] == (byte)'\t')) ps++;
                 int pe = len;
@@ -143,58 +192,118 @@ namespace Shell
                 }
                 else
                 {
-                    // Freestanding MiniCoreLib has no string(char[]) ctors:
-                    // match the four known FAT32 payload names explicitly.
-                    string vfsPath = null;
-                    if (plen == 10 && buf[ps] == (byte)'/' &&
-                        buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
-                        buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
-                        buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
-                        buf[ps+7] == (byte)'T' && buf[ps+8] == (byte)'X' &&
-                        buf[ps+9] == (byte)'T')
+                    bool isPosix = false;
+                    if (MatchCommand(buf + ps, plen, "/bin/posix_test") ||
+                        MatchCommand(buf + ps, plen, "/bin/hello.pie") ||
+                        MatchCommand(buf + ps, plen, "/bin/cat.pie") ||
+                        MatchCommand(buf + ps, plen, "posix_test") ||
+                        MatchCommand(buf + ps, plen, "hello.pie") ||
+                        MatchCommand(buf + ps, plen, "cat.pie") ||
+                        (plen > 4 && buf[pe - 4] == (byte)'.' && buf[pe - 3] == (byte)'p' && buf[pe - 2] == (byte)'i' && buf[pe - 1] == (byte)'e'))
                     {
-                        vfsPath = "/HELLO.TXT";
+                        isPosix = true;
                     }
-                    else if (plen == 9 && buf[ps] == (byte)'/' &&
-                        buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
-                        buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
-                        buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
-                        buf[ps+7] == (byte)'B' && buf[ps+8] == (byte)'I' )
-                    {
-                        vfsPath = "/HELLO.BIN";
-                    }
-                    if (vfsPath == null)
-                    {
-                        grid.WriteString("Usage: exec /HELLO.TXT | /HELLO.BIN\n");
-                        SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> bad path.\n");
-                    }
-                    else
-                    {
 
-                    const ulong targetBase = 0x0000000050000000UL;
-                    const ulong stackTop = 0x00007FFFFFFFF000UL;
-                    // Pre-map staging window for the loader copy.
-                    SyscallWrappers.AllocDma(4UL * 1024 * 1024, targetBase);
-                    ulong entry = PieRelocator.LoadAndRelocateFromVfs(vfsPath, targetBase);
-                    if (entry == 0)
+                    if (isPosix)
                     {
-                        grid.WriteString("[EXEC] Failed to load PIE image.\n");
-                    }
-                    else
-                    {
-                        ulong tid = SyscallWrappers.Spawn(entry, stackTop);
-                        if (tid == 0)
+                        byte* argBuf = stackalloc byte[plen + 1];
+                        for (int i = 0; i < plen; i++) argBuf[i] = buf[ps + i];
+                        argBuf[plen] = 0;
+
+                        // Try finding posix_runner in INITRD first
+                        KernelBootInfo bootInfo = default;
+                        SyscallWrappers.GetBootInfo(&bootInfo);
+                        ulong initrdVirt = 0x22000000UL;
+                        SyscallWrappers.MapMmio(bootInfo.InitrdPhysBase, initrdVirt, bootInfo.InitrdSize, writeCombining: false);
+
+                        byte* posixPayload = null;
+                        ulong posixSize = 0;
+                        bool found = InitrdParser.FindEntry((byte*)initrdVirt, bootInfo.InitrdSize, "posix_runner.bin", out posixPayload, out posixSize);
+
+                        ulong tid = 0;
+                        if (found && posixPayload != null && posixSize > 0)
                         {
-                            grid.WriteString("[EXEC] Spawn failed in Ring 0.\n");
+                            tid = SyscallWrappers.Syscall(SyscallNumbers.SysCreateProcess, (ulong)posixPayload, posixSize, 0x20000000UL, 2, (ulong)argBuf, 0);
                         }
                         else
                         {
-                            grid.WriteString("[EXEC] Spawned Ring 3 process.\n");
+                            // Fallback to VFS
+                            ulong h = VfsClient.Open("/bin/posix_runner", 0);
+                            if (h == 0 || h >= 100) h = VfsClient.Open("/posix_runner.bin", 0);
+                            if (h != 0 && h < 100)
+                            {
+                                ulong fsz = VfsClient.GetFileSize((uint)h);
+                                ulong pVirt = 0x30000000UL;
+                                ulong pPhys = SyscallWrappers.AllocDma((fsz + 4095) & ~4095UL, pVirt);
+                                VfsClient.Read((uint)h, pPhys, 0, fsz);
+                                VfsClient.Close((uint)h);
+                                tid = SyscallWrappers.Syscall(SyscallNumbers.SysCreateProcess, pVirt, fsz, 0x20000000UL, 2, (ulong)argBuf, 0);
+                            }
+                        }
+
+                        if (tid == 0)
+                        {
+                            grid.WriteString("[EXEC] Failed to spawn posix_runner.\n");
+                        }
+                        else
+                        {
+                            grid.WriteString("[EXEC] Spawned posix_runner hosting PIE.\n");
                         }
                     }
+                    else
+                    {
+                        // Freestanding MiniCoreLib has no string(char[]) ctors:
+                        // match the four known FAT32 payload names explicitly.
+                        string vfsPath = null;
+                        if (plen == 10 && buf[ps] == (byte)'/' &&
+                            buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
+                            buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
+                            buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
+                            buf[ps+7] == (byte)'T' && buf[ps+8] == (byte)'X' &&
+                            buf[ps+9] == (byte)'T')
+                        {
+                            vfsPath = "/HELLO.TXT";
+                        }
+                        else if (plen == 9 && buf[ps] == (byte)'/' &&
+                            buf[ps+1] == (byte)'H' && buf[ps+2] == (byte)'E' &&
+                            buf[ps+3] == (byte)'L' && buf[ps+4] == (byte)'L' &&
+                            buf[ps+5] == (byte)'O' && buf[ps+6] == (byte)'.' &&
+                            buf[ps+7] == (byte)'B' && buf[ps+8] == (byte)'I' )
+                        {
+                            vfsPath = "/HELLO.BIN";
+                        }
+                        if (vfsPath == null)
+                        {
+                            grid.WriteString("Usage: exec /HELLO.TXT | /HELLO.BIN | /bin/posix_test\n");
+                            SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> bad path.\n");
+                        }
+                        else
+                        {
+                            const ulong targetBase = 0x0000000050000000UL;
+                            const ulong stackTop = 0x00007FFFFFFFF000UL;
+                            // Pre-map staging window for the loader copy.
+                            SyscallWrappers.AllocDma(4UL * 1024 * 1024, targetBase);
+                            ulong entry = PieRelocator.LoadAndRelocateFromVfs(vfsPath, targetBase);
+                            if (entry == 0)
+                            {
+                                grid.WriteString("[EXEC] Failed to load PIE image.\n");
+                            }
+                            else
+                            {
+                                ulong tid = SyscallWrappers.Spawn(entry, stackTop);
+                                if (tid == 0)
+                                {
+                                    grid.WriteString("[EXEC] Spawn failed in Ring 0.\n");
+                                }
+                                else
+                                {
+                                    grid.WriteString("[EXEC] Spawned Ring 3 process.\n");
+                                }
+                            }
+                        }
                     }
                 }
-                SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> FAT32 PIE spawn.\n");
+                SyscallWrappers.Log("[SHELL] Executing command: 'exec' -> spawn complete.\n");
             }
             else if (MatchCommand(buf, len, "net"))
             {

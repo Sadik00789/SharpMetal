@@ -31,6 +31,12 @@ namespace Kernel.Ipc
             ThreadControlBlock* current = Scheduler.CurrentThread;
             CNode* cspaceRoot = current != null ? current->CSpaceRoot : null;
 
+            // Frontier 5: Per-thread Linux x86-64 ABI dispatch
+            if (current != null && current->AbiMode == 1)
+            {
+                return Posix.PosixSyscallDispatch.Dispatch(syscallNumber, a1, a2, a3, a4, a5, a6);
+            }
+
             switch (syscallNumber)
             {
                 case SyscallNumbers.SysYield: // 0x01
@@ -128,6 +134,21 @@ namespace Kernel.Ipc
                         {
                             uint entryRva = *(uint*)(payload + e_lfanew + 40);
                             entryRip = entryVirt + entryRva;
+                        }
+                    }
+
+                    // Map argument string page at 0x3F000000 in child address space if provided in a5
+                    if (a5 != 0)
+                    {
+                        ulong argPhys = PageFrameAllocator.AllocateFrame();
+                        if (argPhys != 0)
+                        {
+                            byte* argVirt = (byte*)Hhdm.PhysicalToVirtual(argPhys);
+                            for (int i = 0; i < 512; i++) ((ulong*)argVirt)[i] = 0;
+                            byte* src = (byte*)a5;
+                            for (int i = 0; i < 255 && src[i] != 0; i++) argVirt[i] = src[i];
+                            ulong* childPml4Virt = (ulong*)Hhdm.PhysicalToVirtual(childPml4);
+                            VirtualMemorySpace.MapUserPage4K(childPml4Virt, 0x000000003F000000UL, argPhys, Paging.Present | Paging.Writable | Paging.User);
                         }
                     }
 
@@ -392,6 +413,28 @@ namespace Kernel.Ipc
                     return phys;
                 }
 
+                case SyscallNumbers.SysDmaCoherent: // 0x0D: sys_dma_coherent(virtAddr, setUc)
+                {
+                    ulong virtAddr = a1;
+                    if (virtAddr == 0) return 0;
+
+                    ulong userPml4 = (current != null && current->Pml4Address != 0)
+                        ? current->Pml4Address
+                        : Cpu.ReadCr3();
+
+                    ulong* pte = VirtualMemorySpace.GetPtePointer(userPml4, virtAddr);
+                    if (pte == null) return 0;
+
+                    if (a2 != 0)
+                    {
+                        // Force uncacheable: PCD|PWT, then flush the TLB entry.
+                        *pte |= (Paging.CacheDisable | Paging.WriteThrough);
+                        Cpu.Invlpg(virtAddr);
+                    }
+
+                    return *pte & 0xFFFUL;
+                }
+
                 case SyscallNumbers.SysSend: // 0x10: sys_send(cptr, msgInfo, d0, d1, d2, d3)
                 {
                     uint cptr = (uint)a1;
@@ -613,6 +656,16 @@ namespace Kernel.Ipc
                         }
                     }
                     return count;
+                }
+
+                case SyscallNumbers.SysSetAbi: // 0x26: sys_set_abi(abiMode)
+                {
+                    if (current != null)
+                    {
+                        current->AbiMode = (int)a1;
+                        return 0;
+                    }
+                    return ~0UL;
                 }
 
                 default:

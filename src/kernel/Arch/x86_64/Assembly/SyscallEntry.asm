@@ -71,13 +71,26 @@ SyscallEntry:
     ; DispatchSyscall(rcx=num, rdx=a1, r8=a2, r9=a3, [rsp+32]=a4, [rsp+40]=a5, [rsp+48]=a6)
     ; Input: rax=num, rdi=a1, rsi=a2, rdx=a3, r10=a4, r12=a5, r13=a6
     ; (push preserves stack copies; source registers still hold user values)
+    mov rcx, rax            ; 1st arg: num
     mov [rsp + 32], r10     ; 5th arg: a4
-    mov [rsp + 40], r12     ; 6th arg: a5 (d2)
-    mov [rsp + 48], r13     ; 7th arg: a6 (d3)
+
+    ; Frontier 5: Check calling thread AbiMode (offset 244 in TCB)
+    ; If AbiMode == 1 (Linux ABI), 5th arg is user r8, 6th arg is user r9
+    mov rax, [gs:8]         ; CurrentThread (PerCpuData offset 8)
+    test rax, rax
+    jz .default_abi
+    cmp dword [rax + 244], 1 ; AbiMode == 1 (Linux ABI)
+    jne .default_abi
+    mov [rsp + 40], r8      ; 6th arg: Linux a5 (user r8)
+    mov [rsp + 48], r9      ; 7th arg: Linux a6 (user r9)
+    jmp .dispatch
+.default_abi:
+    mov [rsp + 40], r12     ; 6th arg: SharpMetal a5 (d2)
+    mov [rsp + 48], r13     ; 7th arg: SharpMetal a6 (d3)
+.dispatch:
     mov r9, rdx             ; 4th arg: a3
     mov r8, rsi             ; 3rd arg: a2
     mov rdx, rdi            ; 2nd arg: a1
-    mov rcx, rax            ; 1st arg: num
 
     ; 4. Dispatch to C# handler
     call DispatchSyscall

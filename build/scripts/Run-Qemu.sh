@@ -86,6 +86,13 @@ if [[ "$*" != *"-device virtio-net"* ]]; then
     NET_ARGS+=("-netdev" "user,id=net0,hostfwd=udp::8080-:8080" "-device" "virtio-net-pci,netdev=net0")
 fi
 
+# xHCI controller with a single USB keyboard. Attached to xhci.0 so the
+# driver owns exactly one keyboard; pass --no-usb for the PS/2 fallback run.
+XHCI_ARGS=()
+if [[ "$*" != *"qemu-xhci"* ]] && [[ "$*" != *"--no-usb"* ]]; then
+    XHCI_ARGS+=("-device" "qemu-xhci,id=xhci" "-device" "usb-kbd,bus=xhci.0")
+fi
+
 HEADLESS_FLAGS=()
 if [[ "$*" == *"--headless"* ]] || [[ "${CI:-}" == "true" ]]; then
     HEADLESS_FLAGS=("-display" "none" "-vga" "none" "-serial" "stdio" "-no-reboot")
@@ -93,7 +100,7 @@ fi
 
 EXTRA_ARGS=()
 for arg in "$@"; do
-    if [[ "$arg" != "--headless" ]]; then
+    if [[ "$arg" != "--headless" ]] && [[ "$arg" != "--no-usb" ]]; then
         EXTRA_ARGS+=("$arg")
     fi
 done
@@ -106,6 +113,7 @@ done
     "${QEMU_DRIVE_ARGS[@]}" \
     "${NVME_ARGS[@]}" \
     "${NET_ARGS[@]}" \
+    "${XHCI_ARGS[@]}" \
     -smp 4 \
     -m 4G \
     ${HEADLESS_FLAGS[@]:--display none -serial stdio -no-reboot} \

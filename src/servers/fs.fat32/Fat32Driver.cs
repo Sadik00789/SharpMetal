@@ -283,6 +283,7 @@ namespace FsFat32
 
             byte* part = stackalloc byte[32];
             byte* name83 = stackalloc byte[11];
+            byte* alt83 = stackalloc byte[11];
 
             while (*path != 0)
             {
@@ -303,7 +304,34 @@ namespace FsFat32
                 bool isDir;
                 if (!FindEntryInDir(currentDirClus, name83, ref storageClient, out entryClus, out entrySize, out isDir))
                 {
-                    return false;
+                    // Fallback: try FAT short numeric tail "~1"
+                    for (int i = 0; i < 11; i++) alt83[i] = (byte)' ';
+                    int dot = -1;
+                    for (int i = 0; i < partLen; i++) { if (part[i] == '.') { dot = i; break; } }
+                    int bLen = dot >= 0 ? dot : partLen;
+                    int pLen = bLen > 6 ? 6 : bLen;
+                    for (int i = 0; i < pLen; i++)
+                    {
+                        byte c = part[i];
+                        if (c >= 'a' && c <= 'z') c = (byte)(c - 32);
+                        alt83[i] = c;
+                    }
+                    alt83[6] = (byte)'~';
+                    alt83[7] = (byte)'1';
+                    if (dot >= 0)
+                    {
+                        for (int i = 0; i < 3 && (dot + 1 + i) < partLen; i++)
+                        {
+                            byte c = part[dot + 1 + i];
+                            if (c >= 'a' && c <= 'z') c = (byte)(c - 32);
+                            alt83[8 + i] = c;
+                        }
+                    }
+
+                    if (!FindEntryInDir(currentDirClus, alt83, ref storageClient, out entryClus, out entrySize, out isDir))
+                    {
+                        return false;
+                    }
                 }
 
                 if (hasMore)

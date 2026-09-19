@@ -246,10 +246,22 @@ namespace Shell
 
             if (bootInfo.IsHypervisor != 0)
             {
+                // 12. POSIX Frontier 5 Execution: exec /bin/posix_test
+                Grid.WriteString("kernel:> exec /bin/posix_test\n");
+                ShellEngine.ExecuteCommand("exec /bin/posix_test", ref Grid);
+                RenderAndCommit(ref displayClient, surfaceId);
+                for (int i = 0; i < 20; i++) DelayPaced(3000000);
+
+                // 13. POSIX Frontier 5 Execution: exec /bin/cat.pie
+                Grid.WriteString("kernel:> exec /bin/cat.pie\n");
+                ShellEngine.ExecuteCommand("exec /bin/cat.pie", ref Grid);
+                RenderAndCommit(ref displayClient, surfaceId);
+                for (int i = 0; i < 10; i++) DelayPaced(3000000);
+
                 // In automated QEMU test harness: execute scripted 'exit' command to finish CI verification
                 Grid.WriteString("kernel:> exit\n");
                 RenderAndCommit(ref displayClient, surfaceId);
-                DelayPaced(3000000);
+                for (int i = 0; i < 5; i++) DelayPaced(3000000);
 
                 ShellEngine.ExecuteCommand("exit", ref Grid);
             }

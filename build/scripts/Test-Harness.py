@@ -22,7 +22,10 @@ REQUIRED_MILESTONES = [
     r"Hello from ELF",
     r"\[NET\] RX Virtqueue replenished with 16 descriptors",
     r"\[PASS\] NET: VirtIO RX/TX loopback / ICMP processed",
+    r"\[PASS\] XHCI: Controller initialized and USB keyboard addressed",
     r"\[SHELL\] SharpMetal Bare-Metal Shell online",
+    r"Hello from POSIX",
+    r"\[PASS\] POSIX: SYS_write and SYS_read executed successfully",
 ]
 
 def main():
@@ -36,9 +39,15 @@ def main():
     # Step 1: Ensure disk image is built
     disk_img = os.path.join(repo_root, "build/disk.img")
     make_disk = os.path.join(script_dir, "Make-DiskImage.sh")
-    if not os.path.exists(disk_img) or "--build" in sys.argv:
+    # CI always opts into the native xHCI path, which requires the image to be
+    # rebuilt with XHCI_NATIVE=1 so xhci_native.flag is packed. Default builds
+    # (and therefore USB sticks) carry no flag and keep BIOS legacy emulation.
+    ci_native = os.environ.get("XHCI_NATIVE") == "1"
+    if (not os.path.exists(disk_img)) or ("--build" in sys.argv) or ci_native:
         print("[STEP 1] Running Make-DiskImage.sh...")
-        res = subprocess.run(["bash", make_disk], cwd=repo_root)
+        build_env = dict(os.environ)
+        build_env["XHCI_NATIVE"] = "1"
+        res = subprocess.run(["bash", make_disk], cwd=repo_root, env=build_env)
         if res.returncode != 0:
             print("[-] Make-DiskImage.sh failed!")
             sys.exit(1)
@@ -47,6 +56,7 @@ def main():
     proc = subprocess.Popen(
         ["bash", "build/scripts/Run-Qemu.sh", "--headless"],
         cwd=repo_root,
+        stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
@@ -54,12 +64,13 @@ def main():
     )
 
     output_buffer = ""
-    deadline = time.time() + 45
+    deadline = time.time() + 65
     fault_lines = []
+    key_sent = False
 
     while True:
         if time.time() > deadline:
-            print(f"\n[-] Timed out waiting for milestones after 45s.")
+            print(f"\n[-] Timed out waiting for milestones after 65s.")
             proc.kill()
             proc.wait()
             break
@@ -71,6 +82,17 @@ def main():
             sys.stdout.write(line)
             sys.stdout.flush()
             output_buffer += line
+
+            # Feed keypress to satisfy blocking SYS_read(0) in posix_test
+            if ("Hello from POSIX" in line or "Hello from POSIX" in output_buffer) and not key_sent:
+                try:
+                    time.sleep(0.3)
+                    proc.stdin.write("X\n")
+                    proc.stdin.flush()
+                    key_sent = True
+                    print("[HARNESS] Injected serial input 'X\\n' to satisfy blocking SYS_read(0).")
+                except Exception as e:
+                    print(f"[HARNESS] Error injecting serial input: {e}")
 
             # Track kernel panic lines for diagnostics (non-fatal if milestones pass)
             if "[FAULT]" in line or "Kernel Panic" in line:

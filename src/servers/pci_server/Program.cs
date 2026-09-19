@@ -24,6 +24,16 @@ namespace PciServer
         {
             return PciEcamScanner.TriggerFlr(bus, dev, func);
         }
+
+        public ulong FindDeviceExact(uint baseClass, uint subClass, uint progIf)
+        {
+            return PciEcamScanner.FindDeviceExact(baseClass, subClass, progIf);
+        }
+
+        public uint GetMsiMode(uint baseClass, uint subClass)
+        {
+            return PciEcamScanner.GetMsiMode(baseClass, subClass);
+        }
     }
 
     public static unsafe class Program
