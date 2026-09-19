@@ -15,10 +15,16 @@ echo "==> [1/4] Checking git repository status..."
 
 echo "==> [2/4] Locating release build artifacts..."
 IMG_ASSET=$(find build/ -maxdepth 3 -type f -name "disk.img" | head -n 1)
+NVME_ASSET=$(find build/ -maxdepth 3 -type f -name "nvme.img" | head -n 1)
 EFI_ASSET=$(find build/ -maxdepth 5 -type f \( -name "BOOTX64.EFI" -o -name "bootx64.efi" \) | head -n 1)
 
 if [ -z "${IMG_ASSET}" ] || [ ! -f "${IMG_ASSET}" ]; then
     echo "ERROR: disk.img not found under build/! Run: bash build/scripts/Make-DiskImage.sh"
+    exit 1
+fi
+
+if [ -z "${NVME_ASSET}" ] || [ ! -f "${NVME_ASSET}" ]; then
+    echo "ERROR: nvme.img not found under build/! Run: bash build/scripts/Make-DiskImage.sh"
     exit 1
 fi
 
@@ -28,6 +34,7 @@ if [ -z "${EFI_ASSET}" ] || [ ! -f "${EFI_ASSET}" ]; then
 fi
 
 echo "  -> Found Disk Image : ${IMG_ASSET} ($(du -h "${IMG_ASSET}" | cut -f1))"
+echo "  -> Found NVMe Image : ${NVME_ASSET} ($(du -h "${NVME_ASSET}" | cut -f1))"
 echo "  -> Found EFI Binary : ${EFI_ASSET} ($(du -h "${EFI_ASSET}" | cut -f1))"
 
 echo "==> [3/4] Compiling release notes..."
@@ -117,14 +124,29 @@ Reboot into UEFI setup, disable Secure Boot, and select the USB drive. On bare m
 
 ### Included Release Assets
 - `disk.img`: Complete 64MB GPT disk image containing the EFI system partition (FAT32), direct UEFI application boot, the SharpMetal microkernel binary, and the 12-payload `INITRD.IMG`.
+- `nvme.img`: 64MB NVMe storage disk image pre-formatted with FAT32 containing userland test binaries (`/bin/test.pie`, `/bin/posix_test`, `/bin/cat.pie`, `/bin/hello.pie`) and sample assets (`/HELLO.TXT`).
 - `BOOTX64.EFI`: Standalone x86_64 UEFI Native AOT executable.
 NOTES
 
 echo "==> [4/4] Publishing release ${TAG} to GitHub..."
-gh release create "${TAG}" \
-    "${IMG_ASSET}#disk.img (64MB Bootable GPT Disk)" \
-    "${EFI_ASSET}#BOOTX64.EFI (UEFI Native AOT Kernel)" \
-    --title "${TITLE}" \
-    --notes-file "${NOTES_FILE}"
+git tag -f "${TAG}" HEAD
+git push -f origin "${TAG}"
+
+if gh release view "${TAG}" >/dev/null 2>&1; then
+    echo "  -> Updating existing release ${TAG} notes and assets..."
+    gh release edit "${TAG}" --title "${TITLE}" --notes-file "${NOTES_FILE}"
+    gh release upload "${TAG}" \
+        "${IMG_ASSET}#disk.img (64MB Bootable GPT Disk)" \
+        "${NVME_ASSET}#nvme.img (64MB NVMe FAT32 Disk)" \
+        "${EFI_ASSET}#BOOTX64.EFI (UEFI Native AOT Kernel)" \
+        --clobber
+else
+    gh release create "${TAG}" \
+        "${IMG_ASSET}#disk.img (64MB Bootable GPT Disk)" \
+        "${NVME_ASSET}#nvme.img (64MB NVMe FAT32 Disk)" \
+        "${EFI_ASSET}#BOOTX64.EFI (UEFI Native AOT Kernel)" \
+        --title "${TITLE}" \
+        --notes-file "${NOTES_FILE}"
+fi
 
 echo "==> Successfully created and published ${TAG}!"
