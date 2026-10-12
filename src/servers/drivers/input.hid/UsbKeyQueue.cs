@@ -26,8 +26,6 @@ namespace InputHid
         }
 
         private static Ring s_ring;
-        private static bool s_firstInjectReceivedLogged;
-        private static bool s_firstInjectedLogged;
 
         /// <summary>
         /// Appends a key code. When the ring is full the oldest entry is dropped
@@ -46,12 +44,6 @@ namespace InputHid
 
             s_ring.Buffer[head] = key;
             s_ring.Head = next;
-
-            if (!s_firstInjectReceivedLogged)
-            {
-                s_firstInjectReceivedLogged = true;
-                SyscallWrappers.Log("[INPUT] USB HID inject accepted.\n");
-            }
         }
 
         /// <summary>Pops the oldest key code, or 0 when the ring is empty.</summary>
@@ -65,12 +57,6 @@ namespace InputHid
 
             uint key = s_ring.Buffer[tail];
             s_ring.Tail = (tail + 1) & Mask;
-
-            if (!s_firstInjectedLogged)
-            {
-                s_firstInjectedLogged = true;
-                SyscallWrappers.Log("[INPUT] USB HID injected key accepted.\n");
-            }
 
             return key;
         }

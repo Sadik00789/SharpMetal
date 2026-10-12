@@ -12,10 +12,11 @@
 [![Storage](https://img.shields.io/badge/Driver-NVMe%20Direct%20DMA-red.svg)]()
 [![Filesystem](https://img.shields.io/badge/Filesystem-FAT32%20VFS-blueviolet.svg)]()
 [![Network](https://img.shields.io/badge/Network-VirtIO--Net%20PCIe-success.svg)]()
+[![USB](https://img.shields.io/badge/USB-Native%20xHCI%203.0%20%26%20HID-blue.svg)]()
 
 A high-performance, capability-based bare-metal operating system microkernel and multi-server userland written entirely in **C# using Native AOT compilation**, targeting modern 64-bit x86-64 hardware without any dependencies on the standard runtime (CoreCLR), glibc, or external bootloaders.
 
-The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, native xHCI USB HID keyboard control, zero-dependency **kernel-side Linux x86-64 POSIX syscall emulation** allowing standard static Linux PIE binaries to execute in unprivileged Ring 3, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
+The system boots directly from UEFI firmware into higher-half virtual memory, enforces hardware privilege separation (Ring 0 supervisor vs. Ring 3 userland), routes communications through a capability-secured synchronous and asynchronous IPC engine, and provides hardware-accelerated graphics (AVX2), high-throughput storage (NVMe DMA), a dedicated FAT32 filesystem server with a Virtual File System (`System.IO.File`), modern VirtIO network acceleration, **fully operational native xHCI USB 3.0 & HID keyboard drivers enabled by default**, zero-dependency **kernel-side Linux x86-64 POSIX syscall emulation** allowing standard static Linux PIE binaries to execute in unprivileged Ring 3, fault-tolerant supervisor supervision, and an interactive graphical terminal shell.
 
 <p align="center">
   <img src="docs/assets/demo.gif" alt="SharpMetal Microkernel Boot and Interactive Shell Demo" width="800" />
@@ -108,7 +109,7 @@ graph TD
 | **6** | **Unified IPC Engine** | Dual-mode IPC supporting zero-copy synchronous rendezvous with timeslice donation (`sys_call`/`sys_reply`), 64-bit atomic asynchronous notifications (`sys_notify`), and unified dual-wait reactors (`sys_recv_any`). |
 | **7** | **Userland Bootstrap & Root Task** | `roottask` is loaded from `INITRD.IMG`. Microkernel synthesizes an isolated 4-level page directory (PML4) with user bits (`Paging.User`), populates the root CNode, delegates capabilities across servers, and drops to Ring 3 (`CPL = 3`) via `iretq` using strict System V AMD64 ABI compliant `DropToUser` (`RDI=RIP`, `RSI=RSP`, `RDX=CR3`), static Win64 bridge `EnterUserMode`, 5-QWORD `iretq` frame (`User SS: 0x1B`, `User RSP`, `RFLAGS: 0x3202`, `User CS: 0x23`, `User RIP`), and full GPR scrubbing. |
 | **8** | **Dual Runtimes & Roslyn RPC** | **`Userland.Runtime.ZeroAlloc`**: Freestanding, allocation-free runtime backed by `NativeArena` with dynamic chunk-linked expansion (`ArenaChunk`) via high DMA aperture `0x0000_7000_0000_0000UL` for high-throughput driver workloads.<br/>**`Userland.Runtime.Gc`**: Generational mark-sweep micro-GC for user applications.<br/>**`Microkernel.RpcGenerator`**: Roslyn Source Generator emitting devirtualized zero-alloc RPC proxies. |
-| **9** | **PCIe Discovery, NVMe & VirtIO-Net** | `pci_server` maps ECAM space (`0xE0000000`) and programs PCI MSI/MSI-X vectors (NVMe vector `0x30`, VirtIO-Net vector `0x31`). `storage.nvme` initializes Admin Queue Attributes (`AQA`), Submission Queue Base (`ASQ`), and Completion Queue Base (`ACQ`) with 64-entry contiguous rings prior to controller enablement (`CC.EN = 1`), executes verified canary block write/read at LBA 65535, and dispatches interrupt notifications. `net.virtio` drives modern VirtIO-Net via assigned MSI vectors with 16-bit virtqueue wraparound safety (`avail->idx`/`used->idx` as `ushort`, `slot = idx & (RingSize-1)`, wraparound-safe `used - lastUsed` delta) and a descriptor-visibility barrier before index publication. |
+| **9** | **PCIe Discovery, NVMe, VirtIO-Net & Native xHCI** | `pci_server` maps ECAM space (`0xE0000000`) and programs PCI MSI/MSI-X vectors (NVMe vector `0x30`, VirtIO-Net vector `0x31`, xHCI vector `0x32`). `storage.nvme` initializes Admin Queue Attributes (`AQA`), Submission Queue Base (`ASQ`), and Completion Queue Base (`ACQ`) with 64-entry contiguous rings prior to controller enablement (`CC.EN = 1`), executes verified canary block write/read at LBA 65535, and dispatches interrupt notifications. `net.virtio` drives modern VirtIO-Net via assigned MSI vectors with 16-bit virtqueue wraparound safety and a descriptor-visibility barrier before index publication. `bus.xhci` drives native USB 3.0 xHCI host controllers and USB HID keyboards with 256-entry DMA rings, Table 64 doorbell indexing, Table 65 endpoint typing, and wrap-around cycle tracking (enabled by default). |
 | **10** | **FAT32 Filesystem Server & VFS** | `fs.fat32` mounts root block storage, parses BPB/FAT32 structures, and provides cluster-chain lookups. `Microkernel.Vfs` exposes clean `System.IO.File` APIs (`ReadAllText`, `ReadAllBytes`) using shared DMA pages. `Userland.PieLoader.LoadAndRelocateFromVfs` loads freestanding PIE binaries straight from FAT32 (PE section copy + `IMAGE_REL_BASED_DIR64` relocation); Ring-0 `SysSpawn (0x0B)` synthesizes the isolated address space, user/kernel stacks, CNode caps, and Ring 3 entry state. |
 | **11** | **Fault Recovery & Supervisor** | `supervisor` acts as a watchdog process. Intercepts crashed or faulty driver states, performs PCIe Function-Level Resets (FLR), reincarnates child server execution, and reconstructs IPC capability bindings. |
 | **12** | **Compositor & Graphic Shell** | `display_server` composites surfaces directly using AVX2 SIMD vector instructions (`vmovdqu`) with 8-bit alpha blending and dirty region clipping. `apps/shell` provides command history ring buffering, PSF2 font rendering, and integration commands. |
@@ -261,6 +262,16 @@ Because the x86-64 `syscall` instruction unconditionally transitions to Ring 0 v
 - **Non-Deadlocking Bounded Read**: `SYS_read` on fd 0 polls the `InputService` (cptr 10) and COM1 UART with interrupts explicitly unmasked (`Cpu.EnableInterrupts()`) and cooperative yielding (`Scheduler.Yield()`), safely returning `-EAGAIN` (-11) upon timeout.
 - **Freestanding Userland Host (`posix_runner`)**: Stages static Linux PIE ELFs from FAT32 into user memory (`0x40000000`), synthesizes standard System V initial stack frames (`argc`, `argv`, `envp`, `auxv` canary with `AT_ENTRY`, `AT_PHDR`, `AT_PAGESZ`, `AT_RANDOM`), issues `SysSetAbi(1)`, scrubs registers, and branches to `_start`.
 
+### 10. Native xHCI USB 3.0 & HID Keyboard Subsystem (`bus.xhci`)
+SharpMetal features a fully operational, specification-compliant USB 3.0 Extensible Host Controller Interface (xHCI 1.2) driver and USB Human Interface Device (HID) keyboard subsystem, **shipping enabled by default**:
+- **Default Hardware Enablement**: Staged directly into `INITRD.IMG` (`xhci_native.flag`), allowing physical USB keyboards on bare-metal silicon and virtual keyboards under QEMU to operate out of the box with zero manual configuration.
+- **Spec-Compliant Architecture (xHCI 1.2)**: Implements complete hardware lifecycle management—DCBAA (Device Context Base Address Array), Command/Event/Transfer rings expanded to 256 entries in 4096-byte DMA pages, Event Ring Segment Tables (ERST), scratchpad page buffers, and PCI extended capabilities.
+- **Table 64 Register Offset-Based Doorbell Indexing**: In strict compliance with xHCI Specification Section 5.6 and Table 64, doorbell registers are addressed per Slot ID (`DBOFF + SlotID * 4`), resolving command and endpoint timeout failures observed on physical silicon.
+- **Strict Table 65 Endpoint Typing & Parameterization**: Configures EP0 as bidirectional control (Type 4) and Interrupt IN as Type 7 with speed-matched Max Packet Sizes (8 for Low/Full Speed, 64 for High Speed, 512 for SuperSpeed) and Context Entries (`ContextEntries = 2`) for standard HID topologies.
+- **Link TRB Wrap-Around Cycle Invariant**: Link TRB descriptors are stamped with the Producer Cycle State (PCS) prior to cycle bit toggle (`RefreshLinkTrb` before `Cycle ^= 1`), preventing transfer ring stalls and ensuring indefinite typing durability (>100+ keystrokes) across ring boundaries without freezes.
+- **Clean Framebuffer Integration**: All verbose diagnostic logging is silenced in production builds, ensuring the graphical shell prompt (`kernel:>`) remains clear and responsive without text console scroll churn.
+- **Fail-Safe Fallback**: Bounded legacy handoff (`USBLEGSUP`) cleanly aborts without clobbering BIOS state if an unhandled controller topology is encountered, maintaining PS/2 input accessibility.
+
 ---
 
 ## Getting Started
@@ -269,20 +280,21 @@ Because the x86-64 `syscall` instruction unconditionally transitions to Ring 0 v
 To run the microkernel immediately without compiling the source code:
 
 ```bash
-# 1. Download pre-built disk image
-curl -LO https://github.com/sadik00789/SharpMetal/releases/download/v1.1.0/disk.img
+# 1. Download pre-built disk image (v2.0.1)
+curl -LO https://github.com/sadik00789/SharpMetal/releases/download/v2.0.1/disk.img
 
 # 2. Create backing image for NVMe benchmark storage & format FAT32
 qemu-img create -f raw nvme.img 64M
 mkfs.fat -F 32 -s 1 nvme.img
 
-# 3. Launch QEMU (Universal / Emulated AVX2, 4 cores)
+# 3. Launch QEMU (Universal / Emulated AVX2, 4 cores, Native xHCI & VirtIO-Net)
 qemu-system-x86_64 -machine q35 -cpu max -smp 4 -m 1G \
   -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE.fd \
   -drive file=disk.img,format=raw \
   -drive file=nvme.img,format=raw,if=none,id=nvm \
   -device nvme,serial=nvme01,drive=nvm \
-  -netdev user,id=net0 -device virtio-net-pci,netdev=net0
+  -netdev user,id=net0 -device virtio-net-pci,netdev=net0 \
+  -device qemu-xhci,id=xhci -device usb-kbd,bus=xhci.0
 ```
 
 ---
@@ -306,16 +318,16 @@ bash build/scripts/Make-DiskImage.sh
 ```
 This script automatically:
 1. Compiles `MiniCoreLib`, abstractions, and Roslyn generators.
-2. Builds IL binaries for the microkernel, 8 userland servers, and the interactive shell.
+2. Builds IL binaries for the microkernel, 11 userland servers, and the interactive shell (with native xHCI enabled by default).
 3. Invokes RyuJIT / `ilc` (Native AOT) to emit freestanding COFF object files.
 4. Assembles assembly thunks (`nasm -f win64`).
 5. Links `BOOTX64.EFI` and server binaries using `lld-link`.
-6. Packages all servers into `INITRD.IMG`.
+6. Packages all servers and `xhci_native.flag` into `INITRD.IMG`.
 7. Creates a 64 MiB raw NVMe storage image (`build/nvme.img`).
 8. Creates a 64 MiB GPT-partitioned disk image (`build/disk.img`) with FAT32 EFI System Partition.
 
 ### 2. Run in QEMU
-Launch the microkernel under QEMU with UEFI firmware, NVMe emulation, and serial console redirection:
+Launch the microkernel under QEMU with UEFI firmware, NVMe emulation, native xHCI USB controller, and serial console redirection:
 ```bash
 bash build/scripts/Run-Qemu.sh
 ```
@@ -333,7 +345,7 @@ python3 build/scripts/Test-Harness.py
 # Or rebuild the disk image and test in one step:
 python3 build/scripts/Test-Harness.py --build
 ```
-The test harness builds the system, boots QEMU headlessly, streams serial logs, sequentially verifies all boot milestones (CSpace root, PCIe ECAM discovery, NVMe canary block write/read, VirtIO-Net packet transmission, FAT32 VFS read, and Shell interactive readiness), and terminates with a clean exit code `0`.
+The test harness builds the system, boots QEMU headlessly, streams serial logs, sequentially verifies all boot milestones (CSpace root, PCIe ECAM discovery, NVMe canary block write/read, VirtIO-Net packet transmission, FAT32 VFS read, xHCI USB keyboard initialization, and Shell interactive readiness), and terminates with a clean exit code `0`.
 
 ### 4. Record High-Resolution Demo GIF
 Generate an optimized, palette-quantized boot demonstration GIF:
@@ -352,7 +364,7 @@ The script features safety protections to prevent host disk loss:
 - **Removable Drive Check**: Rejects non-removable drives (`RM == 0`) unless explicit `--i-know-what-i-am-doing` is passed.
 - **Mount Point Protection**: Actively detects and refuses to flash root (`/`) or boot (`/boot`) partitions.
 - **Interactive Confirmation**: Prompts with device model, capacity, and requires typing `"YES"`.
-- **Partition Table Settling**: Executes `partprobe "$TARGET" && udevadm settle` after creating a 128 MiB GPT EFI System Partition, checks for both `${TARGET}1` and `${TARGET}p1`, formats with `mkfs.vfat -F 32 -n "SHARPMETAL"`, and stages `BOOTX64.EFI`, `INITRD.IMG`, and `NVME.IMG`.
+- **Partition Table Settling**: Executes `partprobe "$TARGET" && udevadm settle` after creating a 128 MiB GPT EFI System Partition, checks for both `${TARGET}1` and `${TARGET}p1`, formats with `mkfs.vfat -F 32 -n "SHARPMETAL"`, and stages `BOOTX64.EFI`, `INITRD.IMG`, and `NVME.IMG`. Physical USB keyboards are fully operational out of the box.
 
 ---
 

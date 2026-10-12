@@ -39,10 +39,9 @@ def main():
     # Step 1: Ensure disk image is built
     disk_img = os.path.join(repo_root, "build/disk.img")
     make_disk = os.path.join(script_dir, "Make-DiskImage.sh")
-    # CI always opts into the native xHCI path, which requires the image to be
-    # rebuilt with XHCI_NATIVE=1 so xhci_native.flag is packed. Default builds
-    # (and therefore USB sticks) carry no flag and keep BIOS legacy emulation.
-    ci_native = os.environ.get("XHCI_NATIVE") == "1"
+    # Native xHCI is enabled by default (XHCI_NATIVE=1), packing xhci_native.flag
+    # into the initrd for both bare metal and VM environments.
+    ci_native = os.environ.get("XHCI_NATIVE", "1") == "1"
     if (not os.path.exists(disk_img)) or ("--build" in sys.argv) or ci_native:
         print("[STEP 1] Running Make-DiskImage.sh...")
         build_env = dict(os.environ)

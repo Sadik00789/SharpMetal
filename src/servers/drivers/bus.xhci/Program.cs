@@ -21,6 +21,76 @@ namespace Xhci
                 SyscallWrappers.Yield();
             }
 
+            // 1. PCIe ECAM scan across buses 0..3
+            ulong ecamVirt = 0x20000000UL;
+            SyscallWrappers.MapMmio(0xE0000000UL, ecamVirt, 4194304, writeCombining: false);
+
+            bool found = false;
+            ulong bar0Phys = 0;
+
+            for (uint bus = 0; bus < 4; bus++)
+            {
+                for (uint dev = 0; dev < 32; dev++)
+                {
+                    for (uint func = 0; func < 8; func++)
+                    {
+                        ulong offset = (bus << 20) | (dev << 15) | (func << 12);
+                        byte* config = (byte*)(ecamVirt + offset);
+                        ushort vendorId = *(ushort*)(config + 0x00);
+                        if (vendorId == 0xFFFF || vendorId == 0x0000)
+                        {
+                            if (func == 0) break;
+                            continue;
+                        }
+
+                        byte baseClass = config[0x0B];
+                        byte subClass = config[0x0A];
+                        byte progIf = config[0x09];
+
+                        if (baseClass == 0x0C && subClass == 0x03 && progIf == 0x30)
+                        {
+                            found = true;
+
+                            // Enable Bus Master (bit 2) and Memory Space (bit 1)
+                            ushort cmd = *(ushort*)(config + 0x04);
+                            cmd |= 0x0006;
+                            *(ushort*)(config + 0x04) = cmd;
+
+                            uint b0 = *(uint*)(config + 0x10);
+                            uint b1 = *(uint*)(config + 0x14);
+                            bar0Phys = (b0 & ~0xFUL);
+                            if ((b0 & 0x06) == 0x04)
+                            {
+                                bar0Phys |= ((ulong)b1 << 32);
+                            }
+                            break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (found) break;
+            }
+
+            if (!found)
+            {
+                var pci = new Microkernel.Abstractions.Services.PciServiceClient(endpointCptr: 6);
+                ulong pciBar = pci.FindDeviceExact(0x0C, 0x03, 0x30);
+                if (pciBar != 0)
+                {
+                    found = true;
+                    bar0Phys = pciBar;
+                }
+            }
+
+            if (!found || bar0Phys == 0)
+            {
+                SyscallWrappers.Log("[XHCI] no xHC found on PCI\n");
+                return;
+            }
+
+            SyscallWrappers.MapMmio(bar0Phys, XhciController.Bar0Virt, XhciController.Bar0MapSize, writeCombining: false);
+            XhciController.Bar0 = (byte*)XhciController.Bar0Virt;
+
             bool initialized = XhciController.Initialize();
 
             // MSI-X vector 0x32 stays registered in the kernel InterruptDispatcher
@@ -30,6 +100,7 @@ namespace Xhci
             // interrupt delivery succeeding, which is the guarantee that keeps
             // the keyboard alive across the legacy-support handoff.
             uint tick = 0;
+            byte* fb = stackalloc byte[48];
             while (true)
             {
                 XhciController.ProcessEvents();
@@ -44,11 +115,19 @@ namespace Xhci
                         {
                             FrontierTests.XhciTest.EmitPass();
                         }
+                        else if (stage == 0)
+                        {
+                            // Skippable port disconnect during reset; retry immediately.
+                            tick = RetryCadence - 1;
+                        }
                         else
                         {
-                            SyscallWrappers.Log("[XHCI] ENUM FAILED stage=");
-                            LogDec(stage);
-                            SyscallWrappers.Log("\n");
+                            byte* fp = fb;
+                            fp = AppendStr(fp, "[XHCI] ENUM FAILED stage=");
+                            fp = AppendDec(fp, stage);
+                            *fp++ = (byte)'\n';
+                            *fp = 0;
+                            SyscallWrappers.Log(fb);
                         }
                     }
                     else if (!XhciController.PortStillConnected())
@@ -67,27 +146,33 @@ namespace Xhci
             }
         }
 
-        private static void LogDec(uint value)
+
+        private static byte* AppendStr(byte* p, string s)
         {
-            byte* buf = stackalloc byte[12];
-            int idx = 0;
+            for (int i = 0; i < s.Length; i++) p[i] = (byte)s[i];
+            return p + s.Length;
+        }
+
+
+        private static byte* AppendDec(byte* p, uint value)
+        {
             if (value == 0)
             {
-                buf[idx++] = (byte)'0';
+                *p++ = (byte)'0';
+                return p;
             }
-            else
+            byte* tmp = stackalloc byte[12];
+            int n = 0;
+            while (value > 0)
             {
-                byte* tmp = stackalloc byte[12];
-                int n = 0;
-                while (value > 0 && n < 10)
-                {
-                    tmp[n++] = (byte)('0' + (value % 10));
-                    value /= 10;
-                }
-                while (n > 0) buf[idx++] = tmp[--n];
+                tmp[n++] = (byte)('0' + (value % 10));
+                value /= 10;
             }
-            buf[idx] = 0;
-            SyscallWrappers.Log(buf);
+            while (n > 0)
+            {
+                *p++ = tmp[--n];
+            }
+            return p;
         }
     }
 }

@@ -18,6 +18,7 @@ namespace DisplayServer.Compositor
         public static uint Height = 0;
         public static uint Pitch = 0;
         public static ulong FbSize = 0;
+        public static bool IsPhysicalGop = false;
 
         public static void Initialize()
         {
@@ -31,11 +32,13 @@ namespace DisplayServer.Compositor
 
             if (bootInfo.GopPhysBase != 0 && bootInfo.GopFbSize > 0)
             {
+                IsPhysicalGop = true;
                 SyscallWrappers.MapMmio(bootInfo.GopPhysBase, FramebufferVirt, bootInfo.GopFbSize, writeCombining: true);
                 SyscallWrappers.Log("[DISPLAY] GOP Framebuffer mapped via SysMapMmio (Phys != 0).\n");
             }
             else
             {
+                IsPhysicalGop = false;
                 SyscallWrappers.Log("[DISPLAY] Headless mode: Allocating dummy fallback framebuffer.\n");
                 Width = 1024;
                 Height = 768;
@@ -47,7 +50,7 @@ namespace DisplayServer.Compositor
 
         public static void ClearFramebuffer(uint color = 0xFF1E1E2E)
         {
-            if (FramebufferVirt != 0 && Pitch > 0 && Height > 0)
+            if (!IsPhysicalGop && FramebufferVirt != 0 && Pitch > 0 && Height > 0)
             {
                 uint* fb = (uint*)FramebufferVirt;
                 ulong totalPixels = FbSize / 4UL;

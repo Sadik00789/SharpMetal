@@ -39,9 +39,9 @@ namespace Xhci
         public const ulong ReportBufferVirt = 0x76B00000UL;
 
         public const int CommandRingEntries = 64;
-        public const int EventRingEntries = 64;
+        public const int EventRingEntries = 256;
         public const int Ep0RingEntries = 64;
-        public const int Ep1RingEntries = 64;
+        public const int Ep1RingEntries = 256;
         public const int TimeoutIterations = 100000;
         public const int PortResetTimeout = 500000;
 
@@ -65,6 +65,9 @@ namespace Xhci
 
         /// <summary>Control transfer timeout in loop iterations (speed dependent).</summary>
         public static int ControlTimeoutIterations = 500000;
+
+        /// <summary>Cooperative yield loop (~50 ms equivalent) for device settle after port reset.</summary>
+        public static int SettleTimeoutIterations => IsHypervisor ? 10 : 25000;
 
         /// <summary>Last completion code observed, for the failure dump.</summary>
         public static uint LastFailureCode;
@@ -128,10 +131,14 @@ namespace Xhci
         public static uint TransferEventLength;
         public static uint TransferEventCode;
         public static ulong TransferEventTrbPhys;
+        public static Trb LastTransferEvent;
+        public static Trb LastRawEvent;
 
         public static uint Ep0ControlType = XhciRegisters.EpTypeControl;
-        public static uint SlotId;
+        public static uint ActiveSlotId;
+        public static uint SlotId => ActiveSlotId;
         public static uint RootPortId;
+        private static bool s_loggedDiscarded;
 
         // =====================================================================
         // Register access helpers
@@ -141,25 +148,17 @@ namespace Xhci
         private static uint* Db(uint offset) => (uint*)(Bar0 + DbBaseOffset + offset);
 
         /// <summary>
-        /// Rings a device endpoint doorbell using BOTH known encodings so one
-        /// binary works on QEMU and on real xHCI silicon. A doorbell write is an
-        /// idempotent kick, so the duplicate is harmless:
-        ///  - xHCI spec 5.6: DBOFF + slot*0x20 + dci*4, written value = Stream ID (0).
-        ///  - QEMU decoder:  DBOFF + slot*4, written value = DCI.
+        /// xHCI 5.6: Doorbell Array @ BAR0 + DBOFF. One 32-bit register per Slot ID:
+        /// Offset = DBOFF + (SlotID * 4).
+        /// Value  = bits 7:0 DB Target (DCI: 1 for EP0, 3 for EP1 IN).
         /// </summary>
         public static void RingDoorbell(uint slot, uint dci)
         {
-            // All context and TRB writes must be globally visible first.
+            uint offset = DbBaseOffset + (slot * 4);
+            uint* db = (uint*)(Bar0Virt + offset);
             Mfence();
-
-            // The spec form is always issued so the same binary works on real
-            // xHCI silicon. The QEMU decoder form is only issued under a
-            // hypervisor, where the two decoders differ.
-            *Db((slot * 0x20) + (dci * 4)) = 0;
-            if (IsHypervisor)
-            {
-                *Db(slot * 4) = dci;
-            }
+            *db = dci & 0xFFu;
+            Mfence();
         }
 
         public static uint ReadOp(uint offset) => *Op(offset);
@@ -216,16 +215,18 @@ namespace Xhci
             IsHypervisor = bootInfo.IsHypervisor != 0;
 
             var pci = new PciServiceClient(endpointCptr: 6);
-            ulong bar0Phys = pci.FindDeviceExact(0x0C, 0x03, 0x30);
-            if (bar0Phys == 0)
+            if (Bar0 == null)
             {
-                SyscallWrappers.Log("[XHCI] No xHCI controller found (class 0C/03/30).\n");
-                return false;
+                ulong bar0Phys = pci.FindDeviceExact(0x0C, 0x03, 0x30);
+                if (bar0Phys == 0)
+                {
+                    SyscallWrappers.Log("[XHCI] No xHCI controller found (class 0C/03/30).\n");
+                    return false;
+                }
+                SyscallWrappers.MapMmio(bar0Phys, Bar0Virt, Bar0MapSize, writeCombining: false);
+                Bar0 = (byte*)Bar0Virt;
             }
             MsiMode = pci.GetMsiMode(0x0C, 0x03);
-
-            SyscallWrappers.MapMmio(bar0Phys, Bar0Virt, Bar0MapSize, writeCombining: false);
-            Bar0 = (byte*)Bar0Virt;
 
             uint capLength = *(byte*)(Bar0 + XhciRegisters.CapLength);
             ulong hcs1 = *(uint*)(Bar0 + XhciRegisters.HcsParams1);
@@ -237,23 +238,11 @@ namespace Xhci
 
             MaxSlots = (uint)(hcs1 & 0xFF);
             MaxPorts = (uint)((hcs1 >> 24) & 0xFF);
-            // MaxScratchpadBufsHi is a 10-bit field: Hi[26:21] : Lo[31:27].
-            MaxScratchpadBufs = (uint)((((hcs2 >> 21) & 0x1F) << 5) | ((hcs2 >> 27) & 0x1F));
-
-            SyscallWrappers.Log("[XHCI] BAR0 mapped. MaxSlots=");
-            PrintHex(MaxSlots);
-            SyscallWrappers.Log(" MaxPorts=");
-            PrintHex(MaxPorts);
-            SyscallWrappers.Log(" ScratchpadBufs=");
-            PrintHex(MaxScratchpadBufs);
-            SyscallWrappers.Log(" HCCPARAMS1=");
-            PrintHex(HccParams1Raw);
+            // Per xHCI spec HCS2[31:27] is the MSB (Hi) and HCS2[25:21] the LSB (Lo).
+            MaxScratchpadBufs = (uint)((((hcs2 >> 27) & 0x1F) << 5) | ((hcs2 >> 21) & 0x1F));
 
             // CSZ (HCCPARAMS1 bit 2) selects 64-byte context entries.
             CtxSize = (HccParams1Raw & 0x4) != 0 ? 64u : 32u;
-            SyscallWrappers.Log(" CtxSize=");
-            PrintHex(CtxSize);
-            SyscallWrappers.Log("\n");
 
             // 1. Wait until the controller is ready (CNR clear).
             if (!WaitWhileSet(XhciRegisters.UsbSts, XhciRegisters.StsCnr, TimeoutIterations))
@@ -294,7 +283,6 @@ namespace Xhci
                 SyscallWrappers.Log("[XHCI] FAIL CNR\n");
                 return false;
             }
-            SyscallWrappers.Log("[XHCI] Host controller reset complete.\n");
 
             // 3b. Power every root port before it is touched. A port with PP
             //     clear is never reset, and CCS is only sampled once power has
@@ -323,15 +311,10 @@ namespace Xhci
                 pages[9] = ControlBufferVirt;
                 pages[10] = ReportBufferVirt;
 
-                ulong pteFlags = 0;
                 for (int i = 0; i < 11; i++)
                 {
-                    pteFlags = SyscallWrappers.DmaCoherent(pages[i], true);
+                    SyscallWrappers.DmaCoherent(pages[i], true);
                 }
-
-                SyscallWrappers.Log("[XHCI] dma pte=");
-                PrintHex(pteFlags);
-                SyscallWrappers.Log("\n");
             }
 
             // 5. Program the command ring, DCBAA, page size and interrupter.
@@ -356,13 +339,7 @@ namespace Xhci
             }
 
             IsInitialized = true;
-            SyscallWrappers.Log("[XHCI] Controller initialized");
-            switch (MsiMode)
-            {
-                case 2: SyscallWrappers.Log(" (MSI-X vector 0x32).\n"); break;
-                case 1: SyscallWrappers.Log(" (MSI vector 0x32).\n"); break;
-                default: SyscallWrappers.Log(" (polling mode: no MSI capability).\n"); break;
-            }
+            SyscallWrappers.Log("[XHCI] Host controller initialized.\n");
             return true;
         }
 
@@ -397,23 +374,12 @@ namespace Xhci
         private static bool LegacyHandoff()
         {
             uint eecp = (uint)((HccParams1Raw >> 16) & 0xFFFF);
-            SyscallWrappers.Log("[XHCI] Extended capabilities offset (EECP) = ");
-            PrintHex(eecp);
-            SyscallWrappers.Log("\n");
-
             if (eecp == 0)
             {
-                SyscallWrappers.Log("[XHCI] EECP=0: no extended capabilities; no legacy handoff required.\n");
                 return true;
             }
 
             byte* xecp = Bar0 + (eecp << 2);
-            uint firstCap = *(uint*)xecp;
-            SyscallWrappers.Log("[XHCI] First extended capability id=");
-            PrintHex(firstCap & 0xFF);
-            SyscallWrappers.Log(" next=");
-            PrintHex((firstCap & XhciRegisters.XecpNextMask) >> 8);
-            SyscallWrappers.Log("\n");
 
             int guard = 64;
             while (guard-- > 0)
@@ -425,11 +391,9 @@ namespace Xhci
                 {
                     if ((cap & XhciRegisters.XecpBiosOwned) == 0)
                     {
-                        SyscallWrappers.Log("[XHCI] USBLEGSUP present; BIOS does not own legacy support.\n");
                         return true;
                     }
 
-                    SyscallWrappers.Log("[XHCI] USBLEGSUP BIOS-owned; requesting OS ownership.\n");
                     // Claim ownership WITHOUT touching USBLEGCTLSTS: the BIOS may
                     // still be poking the controller while it releases ownership.
                     *(uint*)xecp = cap | XhciRegisters.XecpOsOwned;
@@ -450,14 +414,14 @@ namespace Xhci
                     {
                         // Only now silence the BIOS SMI sources.
                         *(uint*)(xecp + 4) = 0;
-                        SyscallWrappers.Log("[XHCI] USBLEGSUP handoff complete; OS owns legacy support.\n");
                         return true;
                     }
 
-                    // Never surrender ownership and never abort the bring-up:
-                    // continue native best-effort so the keyboard can still work.
-                    SyscallWrappers.Log("[XHCI] handoff timeout; continuing native best-effort\n");
-                    return true;
+                    // Clear the OS-owned bit we set and abort so the BIOS keeps
+                    // providing legacy PS/2 emulation.
+                    *(uint*)xecp = *(uint*)xecp & ~XhciRegisters.XecpOsOwned;
+                    SyscallWrappers.Log("[XHCI] handoff aborted; BIOS keeps legacy emulation\n");
+                    return false;
                 }
 
                 uint next = (cap & XhciRegisters.XecpNextMask) >> 8;
@@ -465,7 +429,6 @@ namespace Xhci
                 xecp += (next << 2);
             }
 
-            SyscallWrappers.Log("[XHCI] No USBLEGSUP capability found; proceeding without handoff.\n");
             return true;
         }
 
@@ -616,6 +579,7 @@ namespace Xhci
             Trb evt;
             while (TryDequeueEvent(out evt))
             {
+                LastRawEvent = evt;
                 uint type = XhciRegisters.TrbTypeOf(evt.Control);
                 if (type == XhciRegisters.TrbPortStatusChange)
                 {
@@ -632,15 +596,18 @@ namespace Xhci
                     LastCompletionParam = evt.Parameter;
                     LastCommandTrbPhys = evt.Parameter;
                     LastCommandDone = true;
+                    break;
                 }
                 else if (type == XhciRegisters.TrbTransferEvent)
                 {
+                    LastTransferEvent = evt;
                     TransferEventValid = true;
                     TransferEventEpId = XhciRegisters.EventEndpointId(evt.Control);
                     TransferEventSlot = XhciRegisters.EventSlotId(evt.Control);
                     TransferEventLength = XhciRegisters.EventTransferLength(evt.Status);
                     TransferEventCode = XhciRegisters.EventCompletionCode(evt.Status);
                     TransferEventTrbPhys = evt.Parameter;
+                    break;
                 }
             }
         }
@@ -666,29 +633,48 @@ namespace Xhci
             CommandRingEnqueue++;
             if (CommandRingEnqueue >= (uint)(CommandRingEntries - 1))
             {
+                RefreshLinkTrb(CommandRing, CommandRingEntries, CommandRingPhys, CommandRingCycle);
                 CommandRingEnqueue = 0;
                 CommandRingCycle ^= 1;
-                RefreshLinkTrb(CommandRing, CommandRingEntries, CommandRingPhys, CommandRingCycle);
             }
 
             Mfence();
             *Db(0) = 0; // Doorbell 0: host controller command ring
 
+            byte* sb = stackalloc byte[128];
             int spin = TimeoutIterations;
             while (spin-- > 0)
             {
                 ProcessEvents();
-                if (LastCommandDone && LastCommandTrbPhys == commandPhys)
+                if (LastCommandDone)
                 {
-                    return LastCompletionCode;
+                    LastCommandDone = false;
+                    if (LastCommandTrbPhys == commandPhys)
+                    {
+                        return LastCompletionCode;
+                    }
+
+                    byte* sp = sb;
+                    sp = AppendStr(sp, "[XHCI] stray cmd event cc=");
+                    sp = AppendHex(sp, LastCompletionCode);
+                    sp = AppendStr(sp, " ptr=");
+                    sp = AppendHex(sp, LastCommandTrbPhys);
+                    sp = AppendStr(sp, " want=");
+                    sp = AppendHex(sp, commandPhys);
+                    *sp++ = (byte)'\n';
+                    *sp = 0;
+                    SyscallWrappers.Log(sb);
                 }
-                LastCommandDone = false;
                 SyscallWrappers.Yield();
             }
 
-            SyscallWrappers.Log("[XHCI] Command timeout for TRB type ");
-            PrintHex(type);
-            SyscallWrappers.Log("\n");
+            byte* tb = stackalloc byte[64];
+            byte* tp = tb;
+            tp = AppendStr(tp, "[XHCI] Command timeout for TRB type ");
+            tp = AppendHex(tp, type);
+            *tp++ = (byte)'\n';
+            *tp = 0;
+            SyscallWrappers.Log(tb);
             return 0;
         }
 
@@ -788,8 +774,38 @@ namespace Xhci
                 uint ps = ReadPortSc(portId);
                 if ((ps & XhciRegisters.PortPr) == 0)
                 {
-                    // Reset complete: clear PRC and wait for the device to be enabled.
+                    // Reset complete: clear PRC and CSC change bits.
                     WritePortSc(portId, ps | XhciRegisters.PortPrc | XhciRegisters.PortCsc);
+                    uint postResetPs = ReadPortSc(portId);
+                    uint speed = (postResetPs >> 10) & 0x0F;
+
+                    // SuperSpeed (USB 3.0, speed >= 4) requires link transition to U0
+                    // via LWS and PLS=0. USB 2.0 (speed 1, 2, 3) enables automatically;
+                    // attempting LWS on USB 2.0 stalls real silicon.
+                    if (speed >= 4)
+                    {
+                        uint u0Ps = (postResetPs & ~XhciRegisters.PortChangeBits & ~(0x0Fu << 5)) | XhciRegisters.PortLws;
+                        WritePortSc(portId, u0Ps);
+                        postResetPs = ReadPortSc(portId);
+                    }
+                    else
+                    {
+                        if ((postResetPs & XhciRegisters.PortPed) == 0)
+                        {
+                            int pedSpin = 10000;
+                            while (pedSpin-- > 0 && (postResetPs & XhciRegisters.PortPed) == 0)
+                            {
+                                SyscallWrappers.Yield();
+                                postResetPs = ReadPortSc(portId);
+                            }
+                            if ((postResetPs & XhciRegisters.PortPed) == 0)
+                            {
+                                return false;
+                            }
+                        }
+                    }
+
+                    WritePortSc(portId, ps | XhciRegisters.PortChangeBits);
                     return true;
                 }
                 SyscallWrappers.Yield();
@@ -805,20 +821,38 @@ namespace Xhci
             while (spin-- > 0)
             {
                 uint ps = ReadPortSc(portId);
-                if ((ps & XhciRegisters.PortPed) != 0)
+                if ((ps & XhciRegisters.PortPed) != 0 && (ps & XhciRegisters.PortPr) == 0)
                 {
                     WritePortSc(portId, ps | XhciRegisters.PortChangeBits);
                     return true;
                 }
                 SyscallWrappers.Yield();
             }
-            SyscallWrappers.Log("[XHCI] Port did not reach Enabled state.\n");
+
+            uint finalPs = ReadPortSc(portId);
+            if ((finalPs & XhciRegisters.PortCcs) == 0)
+            {
+                SyscallWrappers.Log("[XHCI] port disconnected during reset; skipping\n");
+                return false;
+            }
+
+            byte* b = stackalloc byte[64];
+            byte* p = b;
+            p = AppendStr(p, "[XHCI] Port did not reach Enabled state, portsc=");
+            p = AppendHex(p, finalPs);
+            *p++ = (byte)'\n';
+            *p = 0;
+            SyscallWrappers.Log(b);
             return false;
         }
 
         // =====================================================================
         // Device context helpers
         // =====================================================================
+        public static void DumpOutputContext(uint slotId = 0)
+        {
+        }
+
         public static void SetSlotContext(uint* ctx, uint speed, uint portId, uint contextEntries)
         {
             // DW0: Route String[19:0], Speed[23:20], MTT[25], Hub[26], Context Entries[31:27].
@@ -864,6 +898,92 @@ namespace Xhci
         public static uint* InputEndpoint0() => (uint*)((byte*)InputContext + (2 * CtxSize));
         public static uint* InputEndpoint(uint dci) => (uint*)((byte*)InputContext + ((1 + dci) * CtxSize));
 
+        public static uint DisableSlot(uint slotId)
+        {
+            if (slotId == 0) slotId = ActiveSlotId;
+            if (slotId == 0 || slotId > MaxSlots)
+            {
+                ActiveSlotId = 0;
+                return XhciRegisters.CcSuccess;
+            }
+            Trb cmd;
+            cmd.Parameter = 0;
+            cmd.Status = 0;
+            cmd.Control = (XhciRegisters.TrbDisableSlot << (int)XhciRegisters.TrbTypeShift)
+                        | (slotId << 24);
+            uint code = IssueCommand(&cmd);
+            if (slotId <= MaxSlots && Dcbaa != null)
+            {
+                Dcbaa[slotId] = 0;
+            }
+            ActiveSlotId = 0;
+            return code;
+        }
+
+        public static uint EnableSlot(out uint newSlotId)
+        {
+            newSlotId = 0;
+            Trb enableSlot;
+            enableSlot.Parameter = 0;
+            enableSlot.Status = 0;
+            enableSlot.Control = XhciRegisters.TrbEnableSlot << (int)XhciRegisters.TrbTypeShift;
+            uint slotCode = IssueCommand(&enableSlot);
+            if (slotCode == XhciRegisters.CcSuccess)
+            {
+                newSlotId = LastCompletionSlot;
+                ActiveSlotId = LastCompletionSlot;
+            }
+            return slotCode;
+        }
+
+        public static void RebuildSlotState(uint slotId = 0)
+        {
+            if (DeviceContext != null)
+            {
+                ZeroMemory((byte*)DeviceContext, 4096);
+            }
+            if (InputContext != null)
+            {
+                ZeroMemory((byte*)InputContext, 4096);
+            }
+            if (ActiveSlotId >= 1 && ActiveSlotId <= MaxSlots && Dcbaa != null)
+            {
+                Dcbaa[ActiveSlotId] = DeviceContextPhys;
+            }
+            if (Ep0Ring != null)
+            {
+                ZeroMemory((byte*)Ep0Ring, 4096);
+                Ep0Enqueue = 0;
+                Ep0Cycle = 1;
+                RefreshLinkTrb(Ep0Ring, Ep0RingEntries, Ep0RingPhys, Ep0Cycle);
+            }
+            if (Ep1Ring != null)
+            {
+                ZeroMemory((byte*)Ep1Ring, 4096);
+                Ep1Enqueue = 0;
+                Ep1Cycle = 1;
+                RefreshLinkTrb(Ep1Ring, Ep1RingEntries, Ep1RingPhys, Ep1Cycle);
+            }
+        }
+
+        public static uint EvaluateContextEp0(ushort newMps)
+        {
+            ClearInputContextAddFlags();
+            SetInputAddFlags(XhciRegisters.AddEndpoint0);
+
+            uint* ep0 = InputEndpoint0();
+            ep0[1] = (3u << (int)XhciRegisters.EpInfo2CErrShift)
+                   | ((Ep0ControlType & 0x7u) << (int)XhciRegisters.EpInfo2EpTypeShift)
+                   | ((uint)newMps << (int)XhciRegisters.EpInfo2MaxPacketShift);
+
+            Trb cmd;
+            cmd.Parameter = InputContextPhys;
+            cmd.Status = 0;
+            cmd.Control = (XhciRegisters.TrbEvaluateContext << (int)XhciRegisters.TrbTypeShift)
+                        | (ActiveSlotId << 24);
+            return IssueCommand(&cmd);
+        }
+
         /// <summary>One-shot dump of the state needed to bisect a hardware failure.</summary>
         public static void DumpFailure(uint completionCode)
         {
@@ -871,9 +991,11 @@ namespace Xhci
             FailureDumped = true;
             LastFailureCode = completionCode;
 
-            byte* b = stackalloc byte[256];
+            byte* b = stackalloc byte[320];
             byte* p = b;
-            p = AppendStr(p, "[XHCI] DUMP portsc=");
+            p = AppendStr(p, "[XHCI] DUMP slot=");
+            p = AppendDec(p, ActiveSlotId);
+            p = AppendStr(p, " portsc=");
             p = AppendHex(p, (RootPortId >= 1 && RootPortId <= MaxPorts) ? ReadPortSc(RootPortId) : 0);
             p = AppendStr(p, " usbsts=");
             p = AppendHex(p, ReadOp(XhciRegisters.UsbSts));
@@ -885,6 +1007,10 @@ namespace Xhci
             p = AppendHex(p, InputContext != null ? InputEndpoint0()[0] : 0);
             p = AppendStr(p, " ep0_1=");
             p = AppendHex(p, InputContext != null ? InputEndpoint0()[1] : 0);
+            p = AppendStr(p, " ep0_2=");
+            p = AppendHex(p, InputContext != null ? InputEndpoint0()[2] : 0);
+            p = AppendStr(p, " ep0_3=");
+            p = AppendHex(p, InputContext != null ? InputEndpoint0()[3] : 0);
             p = AppendStr(p, " cc=");
             p = AppendHex(p, completionCode);
             *p++ = (byte)'\n';
@@ -920,6 +1046,27 @@ namespace Xhci
             return p;
         }
 
+        private static byte* AppendDec(byte* p, uint value)
+        {
+            if (value == 0)
+            {
+                *p++ = (byte)'0';
+                return p;
+            }
+            byte* tmp = stackalloc byte[12];
+            int n = 0;
+            while (value > 0)
+            {
+                tmp[n++] = (byte)('0' + (value % 10));
+                value /= 10;
+            }
+            while (n > 0)
+            {
+                *p++ = tmp[--n];
+            }
+            return p;
+        }
+
         // =====================================================================
         // Control transfers on EP0
         // =====================================================================
@@ -931,9 +1078,9 @@ namespace Xhci
             Ep0Enqueue++;
             if (Ep0Enqueue >= (uint)(Ep0RingEntries - 1))
             {
+                RefreshLinkTrb(Ep0Ring, Ep0RingEntries, Ep0RingPhys, Ep0Cycle);
                 Ep0Enqueue = 0;
                 Ep0Cycle ^= 1;
-                RefreshLinkTrb(Ep0Ring, Ep0RingEntries, Ep0RingPhys, Ep0Cycle);
             }
         }
 
@@ -944,10 +1091,13 @@ namespace Xhci
         /// </summary>
         public static bool ControlTransfer(byte bmRequestType, byte bRequest, ushort wValue,
             ushort wIndex, ushort wLength, ulong bufferVirt, ulong bufferPhys,
-            out uint grantedLength)
+            out uint grantedLength, int timeoutIterations = -1, bool silent = false, uint* outCompletionCode = null)
         {
             grantedLength = 0;
             TransferEventValid = false;
+            LastTransferEvent = default;
+            LastRawEvent = default;
+            if (outCompletionCode != null) *outCompletionCode = 0;
 
             ulong setup = (ulong)bmRequestType
                         | ((ulong)bRequest << 8)
@@ -996,32 +1146,125 @@ namespace Xhci
             EnqueueEp0(&statusTrb);
 
             // Kick the default control endpoint (DCI 1).
-            RingDoorbell(SlotId, 1);
+            RingDoorbell(ActiveSlotId, 1);
 
-            int spin = ControlTimeoutIterations;
+            int spin = (timeoutIterations > 0) ? timeoutIterations : ControlTimeoutIterations;
+            uint discardedInThisTransfer = 0;
             while (spin-- > 0)
             {
                 ProcessEvents();
-                if (TransferEventValid && TransferEventEpId == 1)
+                if (TransferEventValid)
                 {
+                    uint evtSlot = (LastTransferEvent.Control >> 24) & 0xFFu;
+                    uint evtDci = (LastTransferEvent.Control >> 16) & 0xFFu;
+
+                    if (evtSlot != ActiveSlotId || evtDci != 1)
+                    {
+                        TransferEventValid = false;
+                        discardedInThisTransfer++;
+                        SyscallWrappers.Yield();
+                        continue;
+                    }
+
+                    // Matching transfer event on ActiveSlotId and DCI 1
                     uint code = TransferEventCode;
                     TransferEventValid = false;
+
+                    if (discardedInThisTransfer > 0 && !s_loggedDiscarded)
+                    {
+                        s_loggedDiscarded = true;
+                        byte* db = stackalloc byte[64];
+                        byte* dp = db;
+                        dp = AppendStr(dp, "[XHCI] discarded ");
+                        dp = AppendDec(dp, discardedInThisTransfer);
+                        dp = AppendStr(dp, " foreign events\n");
+                        *dp = 0;
+                        SyscallWrappers.Log(db);
+                    }
+
+                    if (outCompletionCode != null) *outCompletionCode = code;
                     if (code == XhciRegisters.CcSuccess || code == XhciRegisters.CcShortPacket)
                     {
                         grantedLength = wLength - TransferEventLength;
                         if (grantedLength > wLength) grantedLength = wLength;
                         return true;
                     }
-                    SyscallWrappers.Log("[XHCI] Control transfer failed, completion code ");
-                    PrintHex(code);
-                    SyscallWrappers.Log("\n");
+                    if (!silent)
+                    {
+                        byte* b = stackalloc byte[64];
+                        byte* p = b;
+                        p = AppendStr(p, "[XHCI] Control transfer failed, completion code ");
+                        p = AppendHex(p, code);
+                        *p++ = (byte)'\n';
+                        *p = 0;
+                        SyscallWrappers.Log(b);
+                    }
                     return false;
                 }
-                TransferEventValid = false;
                 SyscallWrappers.Yield();
             }
 
-            SyscallWrappers.Log("[XHCI] Control transfer timed out.\n");
+            ProcessEvents();
+            if (TransferEventValid)
+            {
+                uint evtSlot = (LastTransferEvent.Control >> 24) & 0xFFu;
+                uint evtDci = (LastTransferEvent.Control >> 16) & 0xFFu;
+                if (evtSlot != ActiveSlotId || evtDci != 1)
+                {
+                    TransferEventValid = false;
+                    discardedInThisTransfer++;
+                }
+                else
+                {
+                    uint code = TransferEventCode;
+                    TransferEventValid = false;
+                    if (discardedInThisTransfer > 0 && !s_loggedDiscarded)
+                    {
+                        s_loggedDiscarded = true;
+                        byte* db = stackalloc byte[64];
+                        byte* dp = db;
+                        dp = AppendStr(dp, "[XHCI] discarded ");
+                        dp = AppendDec(dp, discardedInThisTransfer);
+                        dp = AppendStr(dp, " foreign events\n");
+                        *dp = 0;
+                        SyscallWrappers.Log(db);
+                    }
+                    if (outCompletionCode != null) *outCompletionCode = code;
+                    if (code == XhciRegisters.CcSuccess || code == XhciRegisters.CcShortPacket)
+                    {
+                        grantedLength = wLength - TransferEventLength;
+                        if (grantedLength > wLength) grantedLength = wLength;
+                        return true;
+                    }
+                    return false;
+                }
+            }
+
+            if (discardedInThisTransfer > 0)
+            {
+                if ((LastTransferEvent.Control >> 24) != ActiveSlotId)
+                {
+                    LastTransferEvent = default;
+                }
+
+                if (!s_loggedDiscarded)
+                {
+                    s_loggedDiscarded = true;
+                    byte* db = stackalloc byte[64];
+                    byte* dp = db;
+                    dp = AppendStr(dp, "[XHCI] discarded ");
+                    dp = AppendDec(dp, discardedInThisTransfer);
+                    dp = AppendStr(dp, " foreign events\n");
+                    *dp = 0;
+                    SyscallWrappers.Log(db);
+                }
+            }
+
+            if (outCompletionCode != null) *outCompletionCode = 0;
+            if (!silent)
+            {
+                SyscallWrappers.Log("[XHCI] Control transfer timed out.\n");
+            }
             return false;
         }
 
@@ -1036,9 +1279,10 @@ namespace Xhci
             Ep1Enqueue++;
             if (Ep1Enqueue >= (uint)(Ep1RingEntries - 1))
             {
+                // Refresh Link TRB with CURRENT cycle so the controller executes it and toggles cycle
+                RefreshLinkTrb(Ep1Ring, Ep1RingEntries, Ep1RingPhys, Ep1Cycle);
                 Ep1Enqueue = 0;
                 Ep1Cycle ^= 1;
-                RefreshLinkTrb(Ep1Ring, Ep1RingEntries, Ep1RingPhys, Ep1Cycle);
             }
         }
 
@@ -1052,7 +1296,7 @@ namespace Xhci
                         | XhciRegisters.TrbIsp;
             EnqueueEp1(&trb);
             // Kick EP1 IN (DCI 3).
-            RingDoorbell(SlotId, 3);
+            RingDoorbell(ActiveSlotId, 3);
         }
     }
 }

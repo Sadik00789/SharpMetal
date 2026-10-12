@@ -44,6 +44,12 @@ namespace Roottask
             SyscallWrappers.Log("\n");
         }
 
+        private static byte* AppendStr(byte* p, string s)
+        {
+            for (int i = 0; i < s.Length; i++) p[i] = (byte)s[i];
+            return p + s.Length;
+        }
+
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "RoottaskMain")]
         public static void Main()
         {
@@ -181,6 +187,21 @@ namespace Roottask
                 bool flagPresent = InitrdParser.FindEntry(initrdBase, bootInfo.InitrdSize,
                     "xhci_native.flag", out flagPayload, out flagSize);
                 bool nativeXhci = (bootInfo.IsHypervisor != 0) || flagPresent;
+
+                byte* gateBuf = stackalloc byte[160];
+                byte* gp = gateBuf;
+                gp = AppendStr(gp, "[ROOTTASK] xhci gate: hypervisor=");
+                *gp++ = (byte)(bootInfo.IsHypervisor != 0 ? '1' : '0');
+                gp = AppendStr(gp, " flag=");
+                gp = AppendStr(gp, flagPresent ? "present" : "absent");
+                gp = AppendStr(gp, " hasXhci=");
+                *gp++ = (byte)(hasXhci ? '1' : '0');
+                gp = AppendStr(gp, " -> ");
+                gp = AppendStr(gp, (hasXhci && nativeXhci) ? "spawning bus.xhci" : "keeping PS/2 authoritative");
+                *gp++ = (byte)'\n';
+                *gp = 0;
+                SyscallWrappers.Log(gateBuf);
+
                 if (hasXhci && nativeXhci)
                 {
                     SyscallWrappers.CreateProcess((ulong)xhciPayload, xhciSize, 0x0000000040000000UL, 1);

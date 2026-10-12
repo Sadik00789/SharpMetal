@@ -77,6 +77,7 @@ namespace Kernel.Diagnostics
 
         public static void WriteChar(char c)
         {
+            DisplayConsole.WriteChar(c);
             if (!s_isSupported) return;
             ulong rflags = AcquireLock();
             try
@@ -102,6 +103,7 @@ namespace Kernel.Diagnostics
 
         public static void Write(string s)
         {
+            DisplayConsole.Write(s);
             if (!s_isSupported || s == null) return;
             ulong rflags = AcquireLock();
             try
@@ -136,11 +138,13 @@ namespace Kernel.Diagnostics
 
         public static void WriteLine(string s)
         {
+            if (s != null) DisplayConsole.WriteLine(s);
+            else DisplayConsole.WriteLine();
             if (!s_isSupported) return;
             ulong rflags = AcquireLock();
             try
             {
-                WriteInternal(s);
+                if (s != null) WriteInternal(s);
                 WriteCharInternal('\r');
                 WriteCharInternal('\n');
             }
@@ -152,6 +156,7 @@ namespace Kernel.Diagnostics
 
         public static void WriteLine()
         {
+            DisplayConsole.WriteLine();
             if (!s_isSupported) return;
             ulong rflags = AcquireLock();
             try
@@ -179,6 +184,7 @@ namespace Kernel.Diagnostics
 
         public static void WriteHex(ulong value)
         {
+            DisplayConsole.WriteHex(value);
             if (!s_isSupported) return;
             ulong rflags = AcquireLock();
             try
@@ -210,6 +216,7 @@ namespace Kernel.Diagnostics
 
         public static void WriteDec(long value)
         {
+            DisplayConsole.WriteDec(value);
             if (!s_isSupported) return;
             ulong rflags = AcquireLock();
             try

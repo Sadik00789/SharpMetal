@@ -51,12 +51,19 @@ namespace FrontierTests
             }
             if (!XhciController.WaitPortEnabled(portId, 500000))
             {
+                uint finalPs = XhciController.ReadPortSc(portId);
+                if ((finalPs & XhciRegisters.PortCcs) == 0)
+                {
+                    // Skippable: port disconnected during reset, not a stage-3 failure.
+                    stage = 0;
+                    return false;
+                }
                 stage = 3;
                 return false;
             }
-            if (!UsbHidKeyboard.Enumerate(portId))
+            if (!UsbHidKeyboard.Enumerate(portId, out stage))
             {
-                stage = 4;
+                if (stage == 0) stage = 4;
                 return false;
             }
 

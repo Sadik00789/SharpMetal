@@ -31,7 +31,7 @@ namespace Xhci
         // ---- Capability registers (BAR0 + offset) ----
         public const uint CapLength = 0x00;
         public const uint HcsParams1 = 0x04; // MaxSlots[7:0], MaxIntrs[18:8], MaxPorts[31:24]
-        public const uint HcsParams2 = 0x08; // MaxScratchpadBufs[25:21]
+        public const uint HcsParams2 = 0x08; // MaxScratchpadBufs Hi[31:27] : Lo[25:21]
         public const uint HccParams1 = 0x10; // EECP[31:16]
         public const uint DbOff = 0x14;
         public const uint RtOff = 0x18;
@@ -98,8 +98,10 @@ namespace Xhci
         public const uint TrbStatusStage = 4;
         public const uint TrbLink = 6;
         public const uint TrbEnableSlot = 9;
+        public const uint TrbDisableSlot = 10;
         public const uint TrbAddressDevice = 11;
         public const uint TrbConfigureEndpoint = 12;
+        public const uint TrbEvaluateContext = 13;
         public const uint TrbNoOpCmd = 23;
         public const uint TrbTransferEvent = 32;
         public const uint TrbCommandCompletion = 33;
@@ -128,30 +130,28 @@ namespace Xhci
         public const uint CcBandwidth = 17;
         public const uint CcContextState = 19;
 
-        // ---- Endpoint types (Endpoint Context dword1 bits 5:3) ----
-        public const uint EpTypeIsochOut = 1;
-        public const uint EpTypeIsochIn = 2;
-        public const uint EpTypeBulkOut = 3;
-        public const uint EpTypeBulkIn = 4;
-        public const uint EpTypeInterruptOut = 5;
-        public const uint EpTypeInterruptIn = 6;
-        // Control (bidirectional, EP0 only). Confirmed against QEMU's xHCI,
-        // which accepts 3 for the default control endpoint.
-        public const uint EpTypeControl = 3;
+        // ---- Endpoint types (Endpoint Context dword1 bits 5:3) per xHCI Table 65 ----
+        public const uint EpTypeIsochOut     = 1;
+        public const uint EpTypeBulkOut      = 2;
+        public const uint EpTypeInterruptOut = 3;
+        public const uint EpTypeControl      = 4; // Spec Table 65: Control (Bidirectional)
+        public const uint EpTypeIsochIn      = 5;
+        public const uint EpTypeBulkIn       = 6;
+        public const uint EpTypeInterruptIn  = 7; // Spec Table 65: Interrupt IN
 
-        /// <summary>EP0 uses the confirmed Control encoding unconditionally.</summary>
+        public const int EndpointTypeAttempts = 1;
+
+        /// <summary>EP0 Control endpoint type strictly per xHCI Table 65 (Type 4).</summary>
         public static uint Ep0TypeForAttempt(int attempt)
         {
-            return EpTypeControl;
+            return EpTypeControl; // 4
         }
 
-        /// <summary>Interrupt IN type: spec value 6 first, implementation value 3 second.</summary>
+        /// <summary>Interrupt IN type strictly per xHCI Table 65 (Type 7).</summary>
         public static uint InterruptInTypeForAttempt(int attempt)
         {
-            return attempt == 0 ? EpTypeInterruptIn : 3u;
+            return EpTypeInterruptIn; // 7
         }
-
-        public const int EndpointTypeAttempts = 2;
 
         // ---- Endpoint context dword1 fields ----
         public const uint EpInfo2CErrShift = 1;
@@ -267,6 +267,23 @@ namespace Xhci
                 case 3: return 64;   // High speed
                 case 4: return 255;  // SuperSpeed: 512 reported via 2^9 exponent
                 case 5: return 255;
+                default: return 8;
+            }
+        }
+
+        /// <summary>
+        /// Choose EP0 MPS strictly per spec bit positions:
+        /// LS(2)->8, FS(1)->8, HS(3)->64, SS(4)->512, SS+(5)->512.
+        /// </summary>
+        public static ushort Ep0MaxPacketForSpeed(uint speed)
+        {
+            switch (speed)
+            {
+                case 1: return 8;    // Full speed
+                case 2: return 8;    // Low speed
+                case 3: return 64;   // High speed
+                case 4: return 512;  // SuperSpeed
+                case 5: return 512;  // SuperSpeedPlus
                 default: return 8;
             }
         }

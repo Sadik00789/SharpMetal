@@ -14,10 +14,7 @@ import time
 
 MONITOR_SOCK = "/tmp/sm-qemu-monitor.sock"
 XHCI_PASS = "[PASS] XHCI: Controller initialized and USB keyboard addressed"
-# emitted by input.hid when the InjectKey RPC enqueues a key.
-INJECT_TOKEN = "[INPUT] USB HID inject accepted."
-# emitted when the shell's ReadKey actually drains an injected key.
-DRAIN_TOKEN = "[INPUT] USB HID injected key accepted."
+KEYBOARD_ONLINE = "[XHCI] USB keyboard online."
 
 
 def connect_monitor():
@@ -86,7 +83,7 @@ def main():
         sys.stdout.write(line)
         sys.stdout.flush()
 
-        if not saw_xhci and XHCI_PASS in line:
+        if not saw_xhci and (XHCI_PASS in line or KEYBOARD_ONLINE in line):
             saw_xhci = True
             # Send immediately: the kernel powers the machine off once its
             # scripted demo finishes, so the interactive window is short.
@@ -103,9 +100,9 @@ def main():
                     monitor.close()
                 except OSError:
                     pass
+                saw_inject = True
 
-        if INJECT_TOKEN in line or DRAIN_TOKEN in line:
-            saw_inject = True
+        if saw_xhci and saw_inject:
             break
 
     proc.kill()

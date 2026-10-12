@@ -8,7 +8,36 @@ MAGIC = 0x445254494E49534F  # 'OSINITRD'
 def align_up(val, align):
     return (val + align - 1) & ~(align - 1)
 
+def verify_entry(archive_path, target_name):
+    if not os.path.isfile(archive_path):
+        print(f"[BUILD] ERROR: archive '{archive_path}' not found")
+        sys.exit(1)
+    with open(archive_path, 'rb') as f:
+        header = f.read(16)
+        if len(header) < 16:
+            print("[BUILD] ERROR: archive header too small")
+            sys.exit(1)
+        magic, entry_count, total_size = struct.unpack('<QII', header)
+        for _ in range(entry_count):
+            entry_hdr = f.read(48)
+            if len(entry_hdr) < 48:
+                break
+            name_bytes, offset, length = struct.unpack('<32sQQ', entry_hdr)
+            name = name_bytes.split(b'\x00', 1)[0].decode('utf-8', errors='ignore')
+            if name == target_name:
+                print(f"[BUILD] verified: {target_name} present in INITRD")
+                sys.exit(0)
+    print(f"[BUILD] ERROR: {target_name} missing from INITRD")
+    sys.exit(1)
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == '--verify':
+        if len(sys.argv) < 4:
+            print("Usage: Pack-Initrd.py --verify <output.img> <entry_name>")
+            sys.exit(1)
+        verify_entry(sys.argv[2], sys.argv[3])
+        return
+
     if len(sys.argv) < 3:
         print("Usage: Pack-Initrd.py <output.img> <name1=file1> [name2=file2 ...]")
         sys.exit(1)

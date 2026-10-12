@@ -50,6 +50,7 @@ namespace Kernel.Ipc
                     if (a1 != 0)
                     {
                         EarlySerial.WriteBytes((byte*)a1);
+                        DisplayConsole.WriteBytes((byte*)a1);
                     }
                     return 0;
 

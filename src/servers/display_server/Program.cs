@@ -34,6 +34,8 @@ namespace DisplayServer
             return 1; // Surface ID 1
         }
 
+        public static bool Verbose = false;
+
         public uint CommitSurface(uint surfaceId, uint x, uint y, uint w, uint h)
         {
             if (!s_surfaceMapped)
@@ -49,14 +51,20 @@ namespace DisplayServer
                 if (DirtyRegionTracker.Clip(ref cx, ref cy, ref cw, ref ch, SoftwareBlitterAvx2.Width, SoftwareBlitterAvx2.Height))
                 {
                     SoftwareBlitterAvx2.BlitClientSurface((uint*)ClientSurfaceVirt, s_surfaceWidth, s_surfaceHeight, cx, cy, cw, ch);
-                    SyscallWrappers.Log("[DISPLAY] Blitted successfully.\n");
+                    if (Verbose)
+                    {
+                        SyscallWrappers.Log("[DISPLAY] Blitted successfully.\n");
+                    }
                 }
                 else
                 {
                     SyscallWrappers.Log("[DISPLAY] ERROR: Clip returned false!\n");
                 }
             }
-            SyscallWrappers.Log("[DISPLAY] AVX2 compositor blitted alpha-blended surface.\n");
+            if (Verbose)
+            {
+                SyscallWrappers.Log("[DISPLAY] AVX2 compositor blitted alpha-blended surface.\n");
+            }
             return 0;
         }
     }

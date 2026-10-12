@@ -610,7 +610,8 @@ echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
     --directpinvoke:GetApEntry64 \
     --directpinvoke:SetApInitialStack \
     --directpinvoke:GetApTrampolineBinary \
-    --directpinvoke:GetApTrampolineBinarySize
+    --directpinvoke:GetApTrampolineBinarySize \
+    --directpinvoke:GetKernelFontGlyphs
 
 echo "[NASM] Assembling ApTrampoline.asm..."
 nasm -f bin "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.asm" \
@@ -663,14 +664,14 @@ cp "${REPO_ROOT}/build/BOOTX64.EFI" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
 echo '\EFI\BOOT\BOOTX64.EFI' > "${ESP_DIR}/startup.nsh"
 
 echo "[PACK] Packaging initial ramdisk (INITRD.IMG)..."
-# Opt-in flag: roottask only spawns bus.xhci when this entry is present (or
-# when running under a hypervisor). It is packed ONLY for CI runs
-# (XHCI_NATIVE=1) so bare-metal media never opt in and keep BIOS legacy.
+# Native xHCI support: roottask spawns bus.xhci when this entry is present (or
+# when running under a hypervisor). Enabled by default (XHCI_NATIVE=1); can be
+# disabled via XHCI_NATIVE=0 for BIOS legacy PS/2 fallback.
 XHCI_FLAG_ARGS=()
-if [ "${XHCI_NATIVE:-0}" = "1" ]; then
-    printf "1" > "${REPO_ROOT}/build/xhci_native.flag"
+if [ "${XHCI_NATIVE:-1}" = "1" ]; then
+    : > "${REPO_ROOT}/build/xhci_native.flag"
     XHCI_FLAG_ARGS+=("xhci_native.flag=${REPO_ROOT}/build/xhci_native.flag")
-    echo "[PACK] XHCI_NATIVE=1: packing xhci_native.flag (native xHCI opt-in)"
+    echo "[BUILD] xhci_native.flag staged into INITRD"
 else
     rm -f "${REPO_ROOT}/build/xhci_native.flag"
     echo "[PACK] Native xHCI opt-in disabled: not packing xhci_native.flag"
@@ -689,6 +690,10 @@ python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
     fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin" \
     shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin" \
     posix_runner.bin="${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
+
+if [ "${XHCI_NATIVE:-1}" = "1" ]; then
+    python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" --verify "${ESP_DIR}/EFI/BOOT/INITRD.IMG" "xhci_native.flag"
+fi
 
 # Constraint 1: Rootless FAT32 Disk Staging
 NVME_IMG="${REPO_ROOT}/build/nvme.img"

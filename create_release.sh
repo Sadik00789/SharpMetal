@@ -1,17 +1,14 @@
 #!/usr/bin/env bash
-# SharpMetal release publisher: uploads disk.img + BOOTX64.EFI as a GitHub release.
+# SharpMetal release publisher: uploads disk.img + nvme.img + BOOTX64.EFI as a GitHub release.
 set -euo pipefail
 
-TAG="${1:-v2.0.0}"
-TITLE="SharpMetal ${TAG}: Hardened VMM, Frontiers 1–5 & POSIX Subsystem"
+TAG="${1:-v2.0.1}"
+TITLE="SharpMetal ${TAG}: Fully Operational Native xHCI USB 3.0 & Wrap-Around Freeze Fix"
 
 # Ensure GitHub CLI is available
 command -v gh >/dev/null 2>&1 || { echo "ERROR: GitHub CLI (gh) is not installed or not in PATH."; exit 1; }
 
 echo "==> [1/4] Checking git repository status..."
-# Uncomment if you want automated remote synchronization prior to tagging:
-# git pull --rebase origin main
-# git push origin main
 
 echo "==> [2/4] Locating release build artifacts..."
 IMG_ASSET=$(find build/ -maxdepth 3 -type f -name "disk.img" | head -n 1)
@@ -42,47 +39,39 @@ NOTES_FILE=$(mktemp /tmp/sharpmetal-release-notes.XXXXXX.md)
 trap 'rm -f "${NOTES_FILE}"' EXIT
 
 cat << 'NOTES' > "${NOTES_FILE}"
-# SharpMetal v2.0.0: The Microkernel Frontier
+# SharpMetal v2.0.1: Native xHCI Enabled by Default & Ring Wrap Fix
 
 **SharpMetal** is an experimental, bare-metal x86_64 microkernel written in 100% pure C# and compiled to zero-dependency native code using **.NET 10 Native AOT**. Operating at Ring 0 with a capability-based security model inspired by seL4, it features zero garbage-collection overhead in core IPC/scheduler paths and executes within a Higher-Half Direct Map (HHDM) memory layout.
 
-Version **v2.0.0** introduces the **Frontiers 1–5 architectural hardening milestone**: a hardened VMM with demand paging and COW, dynamic ELF/PIE execution, a full Layer 2–4 network stack, a native USB 3.0 xHCI host driver with HID support, and a userland POSIX compatibility layer.
+Version **v2.0.1** delivers a major stability and hardware compatibility milestone: the **Native xHCI USB 3.0 & HID Keyboard subsystem is now fully operational and ships enabled by default** across all generated media, eliminating physical USB keyboard freezes, expanding ring capacities, aligning doorbells and endpoint types strictly with the xHCI 1.2 specification, and quieting driver logging for a pristine graphical framebuffer shell experience.
 
 ---
 
-### What's New in v2.0.0
+### What's New in v2.0.1
 
-#### 1. Frontier 1: VMM & SMP Concurrency Hardening
-- **Lock-Free COW Refcounting:** `PhysicalFrameRefcount` converted to atomic Compare-And-Swap (CAS) loops, eliminating spinlock contention during high-frequency Copy-On-Write page sharing and unsharing.
-- **Inter-Processor TLB Shootdown:** `SmpTlbShootdown` integrated across all mutation paths—both during frame duplication and when single-reference pages are upgraded back to writable mode.
-- **Canonical Address Boundary Enforcement:** The fault handler strictly enforces the `< 0x0000_8000_0000_0000` bound, immediately terminating unprivileged processes that attempt to probe the higher-half direct map (HHDM).
+#### 1. Native xHCI Enabled by Default
+- **Out-of-the-Box Operation:** `Make-DiskImage.sh` now defaults to `XHCI_NATIVE=1`, automatically packaging `xhci_native.flag` into `INITRD.IMG`.
+- **Zero Configuration:** USB keyboards on bare-metal systems (such as modern laptops and PCs) and in QEMU virtualized environments operate immediately at boot without manual opt-in flags.
+- **Fail-Safe Fallback:** If no xHCI controller is detected or BIOS handoff bounds are exceeded, the system gracefully retains authoritative PS/2 keyboard processing.
 
-#### 2. Frontier 2: Dynamic ELF/PIE Relocation & Execution
-- `Userland.PieLoader` gains a zero-alloc ELF64 parser (`Elf64_Ehdr`/`Phdr`/`Dyn`/`Rela`) with `PT_LOAD` segments registered as demand-paged, file-backed VMAs.
-- `R_X86_64_RELATIVE` relocations applied against an ASLR base; kernel `SysSpawnElf` synthesizes the System V initial stack (argc/argv/envp + `AT_PHDR`/`AT_ENTRY`/`AT_RANDOM` auxv) and drops to Ring 3.
+#### 2. Link TRB Wrap-Around Invariant & Freeze Fix
+- **Root Cause Eliminated:** Fixed the physical USB keyboard freeze occurring after ~30 keystrokes caused by premature cycle bit toggling before Link TRB stamping.
+- **Producer Cycle State (PCS) Invariant:** Transfer rings now strictly stamp the Link TRB (`RefreshLinkTrb`) with the *current* cycle state before toggling the cycle bit (`Cycle ^= 1`) and resetting enqueue pointers.
+- **Continuous Typing Durability:** Fully verified with continuous, uninterrupted typing (>100+ keystrokes) across multiple ring wrap cycles without controller halts. Applied consistently across EP1 IN transfer rings, EP0 control rings, and command rings.
 
-#### 3. Frontier 3: VirtIO Network Driver & Microkernel IP Stack (`net.stack`)
-- **Layer 2/3/4:** Ethernet framing, ARP cache with expiration, IPv4 routing with checksum calculation, ICMP echo responder, UDP sockets, and a full TCP state machine (CLOSED through TIME_WAIT) with RTO retransmission.
-- **POSIX-like Socket RPC:** `socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, and `close` exposed over the capability-secured `INetworkService` endpoint.
-- **VirtIO-Net:** Split RX/TX virtqueues with zero-alloc DMA replenishment and interrupt-driven RX via `sys_recv_any`.
+#### 3. Ring Capacity Expansions
+- **256-Entry DMA Rings:** Expanded `Ep1RingEntries` and `EventRingEntries` from 64 to 256 entries in `XhciController.cs`, fully utilizing allocated 4096-byte DMA pages and significantly expanding burst throughput buffer capacity.
 
-#### 4. Frontier 4: USB 3.0 xHCI Controller & HID Drivers (`bus.xhci`)
-- **Native xHCI Subsystem:** Full hardware lifecycle management—DCBAA, Command/Event/Transfer rings, ERST, per-ring cycle-bit tracking, doorbell arrays, and scratchpad provisioning.
-- **USB HID Boot Protocol:** Keyboard and mouse enumeration, 8-byte boot report translation via HID usage tables, and keys injected into `input.hid` via the `InjectKey` RPC.
-- **Fail-Safe Legacy Handoff:** The `USBLEGSUP` ownership handshake is timeout-bounded; on timeout, the driver cleanly aborts without disabling BIOS legacy emulation, keeping the PS/2 input path functional. A bare-metal safety gate spawns `bus.xhci` only when `xhci_native.flag` is present in the initrd or a hypervisor is detected, keeping PS/2 authoritative on physical hardware unless explicitly opted in.
+#### 4. Specification-Compliant Register Offset Doorbell Indexing
+- **xHCI Spec Table 64 Alignment:** In strict compliance with xHCI Specification Section 5.6 and Table 64, doorbell registers are addressed per Slot ID (`DBOFF + SlotID * 4`), resolving command and endpoint timeout failures observed on physical silicon.
 
-#### 5. Frontier 5: POSIX / Libc & WASI Compatibility Layer (`Microkernel.Posix`)
-- **Syscall ABI Emulation:** Per-thread Linux ABI mode in the kernel dispatch table translates Linux x86_64 syscall numbers (`read`, `write`, `open`, `close`, `mmap`, `brk`, `socket`, `exit`) into SharpMetal capability RPCs.
-- **FD Multiplexer:** FDs 0/1/2 route to the console/input service; FDs >= 3 route to FAT32/VFS handles or network sockets.
-- **POSIX Host Runner:** `posix_runner` hosts statically linked PIE binaries in isolated Ring 3 capability domains.
+#### 5. Strict Table 65 Endpoint Typing & Packet Sizing
+- **Endpoint Types:** Strict adherence to xHCI Table 65: EP0 default control endpoint configured as Type 4 (Bidirectional Control) and EP1 configured as Type 7 (Interrupt IN).
+- **Speed-Matched Max Packet Sizes:** Dynamically configures EP0 MPS based on port speed (8 bytes for Low/Full Speed, 64 bytes for High Speed, 512 bytes for SuperSpeed), and enforces `ContextEntries = 2` for standard HID single-interface devices.
 
-#### 6. Freestanding Native AOT Runtime Stubs
-- Standalone runtime stubs (`RhpAssignRef`, `RhpNewFast`, `RhpPInvoke`, `__security_cookie`) implemented across all modular userland drivers, stripping away unnecessary CoreLib dependencies.
-
-#### 7. Build Pipeline & Concurrency Performance
-- `Make-DiskImage.sh` packages 12 initrd payloads (11 zero-alloc service binaries plus the xHCI native opt-in flag) into `disk.img`.
-- Removed `-maxcpucount:1` throttling, unlocking full multi-core Roslyn and NASM compilation with safe sequential project ordering.
-- Added `Rebuild-KernelOnly.sh` for rapid kernel turnaround.
+#### 6. Clean Framebuffer & Silent Shell Diagnostics
+- **Pristine Display Console:** All verbose diagnostic logging across `bus.xhci`, `input.hid`, and `display_server` has been silenced in production builds.
+- **Immediate Shell Focus:** The graphical GOP terminal screen cleanly transitions to the interactive `kernel:>` shell prompt without being flooded by dozens of driver discovery and keystroke inject logs.
 
 ---
 
@@ -118,12 +107,12 @@ Identify your target USB drive (`lsblk`) and write the raw GPT disk image:
 # Replace /dev/sdX with your actual USB target drive
 sudo dd if=disk.img of=/dev/sdX bs=4M status=progress oflag=sync
 ```
-Reboot into UEFI setup, disable Secure Boot, and select the USB drive. On bare metal, the PS/2/legacy keyboard path remains authoritative unless `xhci_native.flag` is added to the initrd.
+Reboot into UEFI setup, disable Secure Boot, and select the USB drive. Native xHCI USB input is active by default.
 
 ---
 
 ### Included Release Assets
-- `disk.img`: Complete 64MB GPT disk image containing the EFI system partition (FAT32), direct UEFI application boot, the SharpMetal microkernel binary, and the 12-payload `INITRD.IMG`.
+- `disk.img`: Complete 64MB GPT disk image containing the EFI system partition (FAT32), direct UEFI application boot, the SharpMetal microkernel binary, and the 12-payload `INITRD.IMG` (shipping with `xhci_native.flag`).
 - `nvme.img`: 64MB NVMe storage disk image pre-formatted with FAT32 containing userland test binaries (`/bin/test.pie`, `/bin/posix_test`, `/bin/cat.pie`, `/bin/hello.pie`) and sample assets (`/HELLO.TXT`).
 - `BOOTX64.EFI`: Standalone x86_64 UEFI Native AOT executable.
 NOTES

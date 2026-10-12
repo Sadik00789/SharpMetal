@@ -408,6 +408,11 @@ GetApTrampolineBinarySize:
     mov rax, ApTrampolineBinaryEnd - ApTrampolineBinaryStart
     ret
 
+global GetKernelFontGlyphs
+GetKernelFontGlyphs:
+    lea rax, [rel KernelFontDataStart]
+    ret
+
 section .data
 global ApInitialStacks
 align 16
@@ -421,5 +426,11 @@ align 16
 ApTrampolineBinaryStart:
     incbin "src/kernel/Arch/x86_64/Assembly/ApTrampoline.bin"
 ApTrampolineBinaryEnd:
+
+global KernelFontDataStart
+align 16
+KernelFontDataStart:
+    incbin "src/libs/Microkernel.Drawing/Resources/font.bin"
+
 
 
