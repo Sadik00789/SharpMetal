@@ -669,6 +669,13 @@ namespace Kernel.Ipc
                     return ~0UL;
                 }
 
+                case SyscallNumbers.SysMuteConsole: // 0x27
+                {
+                    DisplayConsole.Muted = true;
+                    DisplayConsole.ClearFullDisplay(0xFF1E1E2E);
+                    return 0;
+                }
+
                 default:
                     return ~0UL;
             }

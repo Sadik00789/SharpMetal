@@ -73,6 +73,15 @@ Version **v2.0.1** delivers a major stability and hardware compatibility milesto
 - **Pristine Display Console:** All verbose diagnostic logging across `bus.xhci`, `input.hid`, and `display_server` has been silenced in production builds.
 - **Immediate Shell Focus:** The graphical GOP terminal screen cleanly transitions to the interactive `kernel:>` shell prompt without being flooded by dozens of driver discovery and keystroke inject logs.
 
+#### 7. FAT32 Partition Offset Detection (LBA 2048)
+- **Automatic Geometry & Offset Probing:** `Fat32Driver` inspects LBA 0 to differentiate between unpartitioned raw FAT32 images and GPT/MBR partitioned disks.
+- **GPT/MBR Partition 1 Support:** Automatically detects the starting sector from partition entry 1 or falls back to standard GPT 1 MiB offset (LBA 2048), resolving boot signature errors on partitioned installation media and restoring `/HELLO.TXT` and `/bin/posix_test` accessibility.
+
+#### 8. Dual-Writer GOP Collision Elimination & Full Screen Clear
+- **Kernel Console Muting (`SysMuteConsole`):** Added syscall 0x27 (`SysMuteConsole`) invoked by `display_server` and `shell` to permanently disable early kernel framebuffer blitting while keeping serial/COM1 logging active.
+- **Full Display Resolution Wipe:** Shell clears the entire GOP panel resolution (e.g. 1920×1080) with `0xFF1E1E2E` on startup, cleanly eliminating residual boot text on the lower screen.
+- **ANSI Escape Sequence Filtering:** Added parser in kernel `DisplayConsole` to consume ESC sequences, eliminating stray ANSI code fragments (`52b`, `54m`).
+
 ---
 
 ### Quick Start & Installation

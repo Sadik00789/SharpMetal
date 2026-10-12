@@ -175,6 +175,22 @@ namespace Shell
             KernelBootInfo bootInfo = default;
             SyscallWrappers.GetBootInfo(&bootInfo);
 
+            // Mute early kernel display console
+            SyscallWrappers.MuteConsole();
+
+            // Clear full display resolution (e.g. 1080p panel) so residual boot logs are wiped
+            if (bootInfo.GopPhysBase != 0 && bootInfo.GopFbSize > 0)
+            {
+                ulong fullFbVirt = 0x3A000000UL;
+                SyscallWrappers.MapMmio(bootInfo.GopPhysBase, fullFbVirt, bootInfo.GopFbSize, writeCombining: true);
+                uint* fullFb = (uint*)fullFbVirt;
+                ulong totalPixels = bootInfo.GopFbSize / 4UL;
+                for (ulong i = 0; i < totalPixels; i++)
+                {
+                    fullFb[i] = 0xFF1E1E2E;
+                }
+            }
+
             // 1. Initialize Micro-GC runtime (Layer 8)
             ulong gcSlabPhys = SyscallWrappers.AllocDma(65536, 0x39000000UL);
             byte* gcSlab = (byte*)0x39000000UL;

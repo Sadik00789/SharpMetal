@@ -79,6 +79,7 @@ namespace DisplayServer
             // Map GOP framebuffer and clear screen with AVX2
             SoftwareBlitterAvx2.Initialize();
             SoftwareBlitterAvx2.ClearFramebuffer(0xFF1E1E2E);
+            SyscallWrappers.MuteConsole();
 
             // Run RPC dispatcher on Slot 7
             s_serviceImpl = new DisplayServiceImpl();

@@ -42,8 +42,35 @@ namespace FsFat32
 
         public const int MaxOpenFiles = 16;
         public static OpenFileInfo* s_openFiles = null;
+        private static ulong s_partitionStartLba = 0;
 
-        public static void Initialize()
+        private static void PrintDec(ulong value)
+        {
+            byte* buf = stackalloc byte[32];
+            int idx = 0;
+            if (value == 0)
+            {
+                buf[idx++] = (byte)'0';
+            }
+            else
+            {
+                byte* tmp = stackalloc byte[32];
+                int t = 0;
+                while (value > 0)
+                {
+                    tmp[t++] = (byte)('0' + (value % 10));
+                    value /= 10;
+                }
+                for (int i = t - 1; i >= 0; i--)
+                {
+                    buf[idx++] = tmp[i];
+                }
+            }
+            buf[idx] = 0;
+            SyscallWrappers.Log(buf);
+        }
+
+        public static bool Initialize()
         {
             // Allocate 4 KiB DMA buffer for sector reading
             s_sectorBufPhys = SyscallWrappers.AllocDma(4096, 0x24000000UL);
@@ -69,35 +96,76 @@ namespace FsFat32
 
             var storageClient = new BlockStorageServiceClient(endpointCptr: 9);
 
-            // 1. Read Sector 0 (Volume Boot Record / BPB)
+            // 1. Read Sector 0 to inspect MBR / GPT Protective MBR vs direct VBR
             storageClient.ReadBlock(0, s_sectorBufPhys);
 
-            ushort bootSig = *(ushort*)(s_sectorBuf + 510);
-            if (bootSig != 0xAA55)
+            ushort sig0 = *(ushort*)(s_sectorBuf + 510);
+
+            // Check if LBA 0 is a direct FAT32 VBR (jump opcode 0xEB/0xE9 and FAT32 string at offset 82)
+            bool isDirectFat32 = (sig0 == 0xAA55) &&
+                                 (s_sectorBuf[0] == 0xEB || s_sectorBuf[0] == 0xE9) &&
+                                 (s_sectorBuf[82] == (byte)'F' && s_sectorBuf[83] == (byte)'A' && s_sectorBuf[84] == (byte)'T');
+
+            ulong targetLba = 0;
+            if (!isDirectFat32)
             {
-                SyscallWrappers.Log("[FAT32] ERROR: Invalid boot signature on LBA 0!\n");
-                return;
+                // Check MBR Partition 1 entry at offset 0x1BE (446)
+                // Partition 1 LBA Start is at offset 446 + 8 (dword)
+                uint part1Lba = *(uint*)(s_sectorBuf + 446 + 8);
+                if (part1Lba != 0 && part1Lba != 1)
+                {
+                    targetLba = part1Lba;
+                }
+                else
+                {
+                    // Standard GPT 1 MiB partition offset fallback
+                    targetLba = 2048;
+                }
             }
 
-            // 2. Parse BPB and FAT32 EBPB
-            BytesPerSector = *(ushort*)(s_sectorBuf + 11);
+            s_partitionStartLba = targetLba;
+
+            // 2. Read the Volume Boot Record at targetLba
+            storageClient.ReadBlock(targetLba, s_sectorBufPhys);
+            byte* vbr = s_sectorBuf;
+            ushort vbrSig = *(ushort*)(vbr + 510);
+            if (vbrSig != 0xAA55)
+            {
+                SyscallWrappers.Log("[FAT32] ERROR: Invalid boot signature on VBR LBA ");
+                PrintDec(targetLba);
+                SyscallWrappers.Log("!\n");
+                return false;
+            }
+
+            // 3. Parse BPB fields relative to s_partitionStartLba
+            BytesPerSector = *(ushort*)(vbr + 11);
             if (BytesPerSector == 0) BytesPerSector = 512;
-            SectorsPerCluster = *(s_sectorBuf + 13);
+            SectorsPerCluster = vbr[13];
             if (SectorsPerCluster == 0) SectorsPerCluster = 1;
-            ReservedSectorCount = *(ushort*)(s_sectorBuf + 14);
-            NumFATs = *(s_sectorBuf + 16);
-            FATSz32 = *(uint*)(s_sectorBuf + 36);
-            RootClus = *(uint*)(s_sectorBuf + 44) & 0x0FFFFFFF;
+            ReservedSectorCount = *(ushort*)(vbr + 14);
+            NumFATs = vbr[16];
+            FATSz32 = *(uint*)(vbr + 36);
+            RootClus = *(uint*)(vbr + 44) & 0x0FFFFFFF;
             if (RootClus == 0) RootClus = 2;
 
-            // 3. Compute Base Offsets
-            FatStartLba = ReservedSectorCount;
-            DataStartLba = ReservedSectorCount + ((ulong)NumFATs * (ulong)FATSz32);
+            if (BytesPerSector != 512 || SectorsPerCluster == 0 || FATSz32 == 0)
+            {
+                SyscallWrappers.Log("[FAT32] ERROR: Invalid BPB geometry.\n");
+                return false;
+            }
+
+            // 4. Compute Base Offsets relative to s_partitionStartLba
+            FatStartLba = s_partitionStartLba + ReservedSectorCount;
+            DataStartLba = FatStartLba + ((ulong)NumFATs * (ulong)FATSz32);
             ClusterSizeBytes = (uint)BytesPerSector * (uint)SectorsPerCluster;
 
             VolumeMounted = true;
 
-            // 4. Scan Root Directory for HELLO.TXT
+            SyscallWrappers.Log("[FAT32] Filesystem mounted successfully at LBA ");
+            PrintDec(s_partitionStartLba);
+            SyscallWrappers.Log(".\n");
+
+            // 5. Scan Root Directory for HELLO.TXT
             ScanRootDirectory(ref storageClient);
 
             // Register HELLO.TXT in handle 1
@@ -107,6 +175,8 @@ namespace FsFat32
                 s_openFiles[1].FileSize = FoundFileSize > 0 ? FoundFileSize : 23;
                 s_openFiles[1].InUse = true;
             }
+
+            return true;
         }
 
         public static ulong ClusterToLba(uint cluster)

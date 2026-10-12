@@ -50,7 +50,7 @@ namespace DisplayServer.Compositor
 
         public static void ClearFramebuffer(uint color = 0xFF1E1E2E)
         {
-            if (!IsPhysicalGop && FramebufferVirt != 0 && Pitch > 0 && Height > 0)
+            if (FramebufferVirt != 0 && Pitch > 0 && Height > 0)
             {
                 uint* fb = (uint*)FramebufferVirt;
                 ulong totalPixels = FbSize / 4UL;

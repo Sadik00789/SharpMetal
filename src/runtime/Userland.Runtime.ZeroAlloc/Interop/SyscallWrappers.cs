@@ -187,5 +187,11 @@ namespace Userland.Runtime.ZeroAlloc.Interop
         {
             return Syscall(SyscallNumbers.SysSetAbi, (ulong)mode, 0, 0, 0, 0, 0);
         }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ulong MuteConsole()
+        {
+            return Syscall(SyscallNumbers.SysMuteConsole, 0, 0, 0, 0, 0, 0);
+        }
     }
 }

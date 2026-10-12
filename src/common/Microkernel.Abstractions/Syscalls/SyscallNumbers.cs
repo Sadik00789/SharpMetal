@@ -35,6 +35,9 @@ namespace Microkernel.Abstractions.Syscalls
         public const ulong SysWrite   = 0x25;
         public const ulong SysSetAbi  = 0x26;
 
+        // Console / Display Control primitives
+        public const ulong SysMuteConsole = 0x27;
+
         // DMA cache-coherence control: sys_dma_coherent(virtAddr, setUc)
         // Returns the PTE flag bits for virtAddr; when setUc != 0 the PTE is
         // switched to uncacheable (PCD|PWT) and the TLB entry is flushed.

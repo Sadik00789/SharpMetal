@@ -11,6 +11,8 @@ namespace Kernel.Diagnostics
         [DllImport("*")]
         public static extern byte* GetKernelFontGlyphs();
 
+        public static volatile bool Muted = false;
+
         private static bool s_initialized = false;
         private static uint* s_fb = null;
         private static uint s_width = 0;
@@ -42,21 +44,59 @@ namespace Kernel.Diagnostics
             s_initialized = true;
         }
 
+        public static void ClearFullDisplay(uint color = BgColor)
+        {
+            if (KernelHigh.GopPhysBase == 0 || KernelHigh.GopFbSize == 0) return;
+            ulong rflags = s_lock.Acquire();
+            try
+            {
+                EnsureInitialized();
+                if (s_fb == null) return;
+                ulong totalPixels = (ulong)s_pitch * s_height;
+                if (totalPixels == 0) totalPixels = KernelHigh.GopFbSize / 4UL;
+                for (ulong i = 0; i < totalPixels; i++)
+                {
+                    s_fb[i] = color;
+                }
+                s_cursorX = 0;
+                s_cursorY = 0;
+            }
+            finally
+            {
+                s_lock.Release(rflags);
+            }
+        }
+
         public static void WriteBytes(byte* msg)
         {
-            if (msg == null) return;
+            if (msg == null || Muted) return;
             if (KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
 
                 int limit = 4096;
                 while (*msg != 0 && limit-- > 0)
                 {
-                    WriteCharInternal((char)(*msg++));
+                    byte b = *msg++;
+                    if (b == 0x1B) // ESC
+                    {
+                        if (*msg == (byte)'[')
+                        {
+                            msg++;
+                            while (*msg != 0 && !((*msg >= (byte)'A' && *msg <= (byte)'Z') || (*msg >= (byte)'a' && *msg <= (byte)'z') || *msg == (byte)'~'))
+                            {
+                                msg++;
+                            }
+                            if (*msg != 0) msg++;
+                        }
+                        continue;
+                    }
+                    WriteCharInternal((char)b);
                 }
             }
             finally
@@ -67,11 +107,12 @@ namespace Kernel.Diagnostics
 
         public static void WriteChar(char c)
         {
-            if (KernelHigh.GopPhysBase == 0) return;
+            if (Muted || KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
                 WriteCharInternal(c);
@@ -84,12 +125,13 @@ namespace Kernel.Diagnostics
 
         public static void Write(string s)
         {
-            if (s == null) return;
+            if (s == null || Muted) return;
             if (KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
 
@@ -106,11 +148,12 @@ namespace Kernel.Diagnostics
 
         public static void WriteLine(string s = "")
         {
-            if (KernelHigh.GopPhysBase == 0) return;
+            if (Muted || KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
 
@@ -131,11 +174,12 @@ namespace Kernel.Diagnostics
 
         public static void WriteHex(ulong value)
         {
-            if (KernelHigh.GopPhysBase == 0) return;
+            if (Muted || KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
 
@@ -156,11 +200,12 @@ namespace Kernel.Diagnostics
 
         public static void WriteDec(long value)
         {
-            if (KernelHigh.GopPhysBase == 0) return;
+            if (Muted || KernelHigh.GopPhysBase == 0) return;
 
             ulong rflags = s_lock.Acquire();
             try
             {
+                if (Muted) return;
                 EnsureInitialized();
                 if (s_fb == null || s_fontData == null) return;
 
