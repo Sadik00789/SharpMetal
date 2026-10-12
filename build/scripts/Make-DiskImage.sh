@@ -707,7 +707,7 @@ mcopy -i "${NVME_IMG}" "${TMP_HELLO}" ::/HELLO.TXT
 
 echo "[ELF] Compiling freestanding static PIE ElfTest.c..."
 TMP_ELF="${TMP_DIR}/test.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_ELF}" "${REPO_ROOT}/src/apps/frontier_tests/ElfTest.c"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_ELF}" "${REPO_ROOT}/src/apps/frontier_tests/ElfTest.c"
 mmd -i "${NVME_IMG}" ::/bin || true
 mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/test.pie
 mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/elftest.pie
@@ -715,7 +715,7 @@ mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/test.pie
 
 echo "[POSIX] Compiling freestanding static PIE hello_world.c..."
 TMP_HELLO_PIE="${TMP_DIR}/hello.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_HELLO_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/hello_world.c"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_HELLO_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/hello_world.c"
 mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/hello.pie
 mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix.pie
 mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix_test
@@ -725,7 +725,7 @@ mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/posix_test
 
 echo "[POSIX] Compiling freestanding static PIE cat.c..."
 TMP_CAT_PIE="${TMP_DIR}/cat.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -o "${TMP_CAT_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/cat.c"
+gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_CAT_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/cat.c"
 mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/bin/cat.pie
 mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/cat.pie
 
@@ -754,6 +754,23 @@ mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::EFI/BOOT
 mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/build/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
 mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/EFI/BOOT/INITRD.IMG" ::EFI/BOOT/INITRD.IMG
 mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/startup.nsh" ::startup.nsh
+
+# Stage sample assets and userland test binaries in the FAT32 ESP partition
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO}" ::/HELLO.TXT
+mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::/bin || true
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/bin/test.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/bin/elftest.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/test.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/hello.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/posix.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/posix_test
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/hello.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/posix.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/posix_test
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_CAT_PIE}" ::/bin/cat.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_CAT_PIE}" ::/cat.pie
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/bin/posix_runner || true
+mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/posix_runner.bin || true
 echo "[DISK] Disk image created successfully at ${DISK_IMG}"
 
 echo "[SUCCESS] Make-DiskImage completed successfully."

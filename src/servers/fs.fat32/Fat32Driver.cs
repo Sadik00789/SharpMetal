@@ -420,6 +420,21 @@ namespace FsFat32
             return false;
         }
 
+        private static bool IsHelloTxtPath(byte* path)
+        {
+            if (path == null) return false;
+            while (*path == '/' || *path == '\\') path++;
+            byte* expected = stackalloc byte[9] { (byte)'H', (byte)'E', (byte)'L', (byte)'L', (byte)'O', (byte)'.', (byte)'T', (byte)'X', (byte)'T' };
+            for (int i = 0; i < 9; i++)
+            {
+                byte c = path[i];
+                if (c >= 'a' && c <= 'z') c = (byte)(c - 32);
+                if (c != expected[i]) return false;
+            }
+            byte term = path[9];
+            return term == 0 || term == ' ' || term == '\r' || term == '\n' || term == '\t';
+        }
+
         public static ulong Open(ulong pathShmCptr, uint flags)
         {
             if (pathShmCptr == 0)
@@ -431,18 +446,17 @@ namespace FsFat32
             SyscallWrappers.MapMmio(pathShmCptr, pathVirt, 4096, writeCombining: false);
             byte* path = (byte*)pathVirt;
 
-            // Check for HELLO.TXT match
-            if ((path[0] == '/' && path[1] == 'H' && path[2] == 'E' && path[3] == 'L' && path[4] == 'L' && path[5] == 'O') ||
-                (path[0] == 'H' && path[1] == 'E' && path[2] == 'L' && path[3] == 'L' && path[4] == 'O'))
+            // Check for HELLO.TXT match against cached handle 1
+            if (IsHelloTxtPath(path) && FoundFileCluster != 0)
             {
-                return (FoundFileCluster != 0) ? 1UL : 0UL;
+                return 1UL;
             }
 
             uint startClus;
             ulong fSize;
             if (FindFile(path, out startClus, out fSize))
             {
-                for (int i = 2; i < MaxOpenFiles; i++)
+                for (int i = 1; i < MaxOpenFiles; i++)
                 {
                     if (!s_openFiles[i].InUse)
                     {

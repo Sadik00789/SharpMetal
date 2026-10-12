@@ -29,16 +29,17 @@ PosixRunnerEntry:
 ;   rdx = userRsp (System V stack pointer pointing to argc)
 ; -----------------------------------------------------------------------------
 JumpToPie:
-    mov r12, rcx        ; preserve entryRip in callee-saved r12
+    mov r12, rcx        ; preserve entryRip in r12
     mov rsp, rdx        ; switch stack to System V initial stack
 
     ; 1. Issue SysSetAbi(1) to transition calling thread to Linux ABI mode
     mov rax, 0x26       ; SyscallNumbers.SysSetAbi
     mov rdi, 1          ; a1 = 1 (Linux ABI)
+    push r12            ; preserve entryRip across kernel syscall execution
     syscall
+    pop r12             ; restore entryRip
 
     ; 2. Clear GPRs per System V AMD64 ABI specification
-    ; rdx = 0 indicates no registered shared-library termination function (atexit)
     xor rax, rax
     xor rbx, rbx
     xor rcx, rcx
@@ -50,6 +51,7 @@ JumpToPie:
     xor r9, r9
     xor r10, r10
     xor r11, r11
+    xor r13, r13
     xor r14, r14
     xor r15, r15
 

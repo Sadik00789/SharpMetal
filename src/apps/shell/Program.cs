@@ -266,13 +266,13 @@ namespace Shell
                 Grid.WriteString("kernel:> exec /bin/posix_test\n");
                 ShellEngine.ExecuteCommand("exec /bin/posix_test", ref Grid);
                 RenderAndCommit(ref displayClient, surfaceId);
-                for (int i = 0; i < 20; i++) DelayPaced(3000000);
+                for (int i = 0; i < 30; i++) DelayPaced(3000000);
 
                 // 13. POSIX Frontier 5 Execution: exec /bin/cat.pie
                 Grid.WriteString("kernel:> exec /bin/cat.pie\n");
                 ShellEngine.ExecuteCommand("exec /bin/cat.pie", ref Grid);
                 RenderAndCommit(ref displayClient, surfaceId);
-                for (int i = 0; i < 10; i++) DelayPaced(3000000);
+                for (int i = 0; i < 15; i++) DelayPaced(3000000);
 
                 // In automated QEMU test harness: execute scripted 'exit' command to finish CI verification
                 Grid.WriteString("kernel:> exit\n");

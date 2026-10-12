@@ -98,6 +98,7 @@ namespace Kernel.Scheduling
             MainThread->IpcMessageInfo = 0;
             MainThread->IpcBadge = 0;
             MainThread->Rflags = 0x202;
+            MainThread->AbiMode = 0;
 
             CurrentThread = MainThread;
             TaskStateSegment.SetRsp0(MainThread->KernelStackTop);
@@ -148,6 +149,7 @@ namespace Kernel.Scheduling
             tcb->CSpaceRoot = MainThread != null ? MainThread->CSpaceRoot : null;
             tcb->CSpaceRootAddress = (ulong)tcb->CSpaceRoot;
             tcb->Pml4Address = Cpu.ReadCr3();
+            tcb->AbiMode = 0;
             tcb->Next = null;
 
             // Initialize clean FPU/SSE/AVX state
@@ -216,6 +218,7 @@ namespace Kernel.Scheduling
             tcb->RemainingTicks = GetPriorityTimeslice(priority);
             tcb->TotalTicks = 0;
             tcb->EntryPoint = null;
+            tcb->AbiMode = 0;
             tcb->Next = null;
 
             // Initialize clean FPU/SSE/AVX state

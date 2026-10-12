@@ -219,6 +219,9 @@ namespace PosixRunner
 
             ulong entryRip = AslrBase + ehdr->e_entry;
 
+            // Transition calling thread to Linux ABI mode before jumping into PIE
+            Microkernel.Posix.PosixAbi.SwitchToLinuxAbi();
+
             Log("[POSIX_RUNNER] Jumping to PIE entry point at 0x");
             PrintHex(entryRip);
             Log("...\n");

@@ -165,15 +165,79 @@ namespace Shell
                 }
                 else
                 {
-                    string target = "/HELLO.TXT";
-                    string content = System.IO.File.ReadAllText(target);
-                    if (content.Length > 0)
+                    // Check if target is HELLO.TXT (with or without leading slash, case-insensitive)
+                    bool isHello = false;
+                    int ps = pathStart;
+                    while (ps < pathEnd && (buf[ps] == (byte)'/' || buf[ps] == (byte)'\\')) ps++;
+                    int remLen = pathEnd - ps;
+                    if (remLen == 9)
                     {
-                        grid.WriteString(content);
+                        if ((buf[ps] == 'H' || buf[ps] == 'h') &&
+                            (buf[ps+1] == 'E' || buf[ps+1] == 'e') &&
+                            (buf[ps+2] == 'L' || buf[ps+2] == 'l') &&
+                            (buf[ps+3] == 'L' || buf[ps+3] == 'l') &&
+                            (buf[ps+4] == 'O' || buf[ps+4] == 'o') &&
+                            buf[ps+5] == '.' &&
+                            (buf[ps+6] == 'T' || buf[ps+6] == 't') &&
+                            (buf[ps+7] == 'X' || buf[ps+7] == 'x') &&
+                            (buf[ps+8] == 'T' || buf[ps+8] == 't'))
+                        {
+                            isHello = true;
+                        }
+                    }
+
+                    if (isHello)
+                    {
+                        string content = System.IO.File.ReadAllText("/HELLO.TXT");
+                        if (content != null && content.Length > 0)
+                        {
+                            grid.WriteString(content);
+                        }
+                        else
+                        {
+                            grid.WriteString("File not found or empty.");
+                        }
                     }
                     else
                     {
-                        grid.WriteString("File not found or empty.");
+                        // Open path directly via VFS IPC
+                        var fsClient = new FilesystemServiceClient(VfsMountManager.ResolveEndpoint("/"));
+                        ulong pathVirt = 0x3A000000UL;
+                        ulong pathPhys = SyscallWrappers.AllocDma(4096, pathVirt);
+                        byte* pathBuf = (byte*)pathVirt;
+                        for (int i = 0; i < pathLen && i < 255; i++)
+                        {
+                            pathBuf[i] = buf[pathStart + i];
+                        }
+                        pathBuf[pathLen < 255 ? pathLen : 255] = 0;
+
+                        ulong handle = fsClient.Open(pathPhys, 0);
+                        if (handle != 0)
+                        {
+                            ulong fsize = fsClient.GetFileSize((uint)handle);
+                            if (fsize > 0)
+                            {
+                                ulong readVirt = 0x3B000000UL;
+                                ulong readPhys = SyscallWrappers.AllocDma((fsize + 4095) & ~4095UL, readVirt);
+                                ulong rBytes = fsClient.Read((uint)handle, readPhys, 0, fsize);
+                                fsClient.Close((uint)handle);
+
+                                byte* src = (byte*)readVirt;
+                                for (ulong i = 0; i < rBytes; i++)
+                                {
+                                    grid.WriteChar((char)src[i]);
+                                }
+                            }
+                            else
+                            {
+                                fsClient.Close((uint)handle);
+                                grid.WriteString("File not found or empty.");
+                            }
+                        }
+                        else
+                        {
+                            grid.WriteString("File not found or empty.");
+                        }
                     }
                 }
                 grid.WriteString("\n");

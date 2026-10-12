@@ -135,6 +135,16 @@ if [ -f "${BUILD_DIR}/esp/startup.nsh" ]; then
     cp "${BUILD_DIR}/esp/startup.nsh" "$TMP_MNT/startup.nsh"
 fi
 
+# Stage sample assets and userland test binaries on USB FAT32 volume
+printf "SharpMetal BareMetal OS" > "$TMP_MNT/HELLO.TXT"
+mkdir -p "$TMP_MNT/bin"
+if [ -f "${BUILD_DIR}/nvme.img" ]; then
+    mcopy -i "${BUILD_DIR}/nvme.img" ::/bin/test.pie "$TMP_MNT/bin/test.pie" 2>/dev/null || true
+    mcopy -i "${BUILD_DIR}/nvme.img" ::/bin/posix_test "$TMP_MNT/bin/posix_test" 2>/dev/null || true
+    mcopy -i "${BUILD_DIR}/nvme.img" ::/bin/hello.pie "$TMP_MNT/bin/hello.pie" 2>/dev/null || true
+    mcopy -i "${BUILD_DIR}/nvme.img" ::/bin/cat.pie "$TMP_MNT/bin/cat.pie" 2>/dev/null || true
+fi
+
 sync
 umount "$TMP_MNT"
 rmdir "$TMP_MNT"

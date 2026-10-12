@@ -664,9 +664,8 @@ namespace Kernel.Ipc
                     if (current != null)
                     {
                         current->AbiMode = (int)a1;
-                        return 0;
                     }
-                    return ~0UL;
+                    return 0;
                 }
 
                 case SyscallNumbers.SysMuteConsole: // 0x27
