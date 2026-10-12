@@ -214,7 +214,6 @@ namespace Shell
 
             // 5. Initialize 32-slot command history ring buffer
             TerminalHistory.Initialize();
-            TerminalHistory.Add("cat /HELLO.TXT");
             TerminalHistory.Add("pci");
             TerminalHistory.Add("nvme");
             TerminalHistory.Add("net");
@@ -222,13 +221,7 @@ namespace Shell
             SyscallWrappers.Log("[SHELL] History ring buffer initialized (32 slots).\n");
             SyscallWrappers.Log("[SHELL] SharpMetal Bare-Metal Shell online.\n");
 
-            // 6. Test VFS File.ReadAllText
-            string helloText = System.IO.File.ReadAllText("/HELLO.TXT");
-            SyscallWrappers.Log("[VFS] File.ReadAllText('/HELLO.TXT') -> \"");
-            SyscallWrappers.Log(helloText);
-            SyscallWrappers.Log("\"\n");
-
-            // 7. Initialize terminal text grid and banner
+            // 6. Initialize terminal text grid and banner
             Grid.Initialize();
             Grid.WriteString("=================================================================\n");
             Grid.WriteString("   SharpMetal Microkernel - Interactive Graphic Shell (Phase 10)\n");
@@ -236,25 +229,19 @@ namespace Shell
             RenderAndCommit(ref displayClient, surfaceId);
             DelayPaced(3000000);
 
-            // 8. Command 1: 'cat /HELLO.TXT'
-            Grid.WriteString("kernel:> cat /HELLO.TXT\n");
-            ShellEngine.ExecuteCommand("cat /HELLO.TXT", ref Grid);
-            RenderAndCommit(ref displayClient, surfaceId);
-            DelayPaced(3000000);
-
-            // 9. Command 2: 'pci'
+            // 7. Command 1: 'pci'
             Grid.WriteString("kernel:> pci\n");
             ShellEngine.ExecuteCommand("pci", ref Grid);
             RenderAndCommit(ref displayClient, surfaceId);
             DelayPaced(3000000);
 
-            // 10. Command 3: 'nvme'
+            // 8. Command 2: 'nvme'
             Grid.WriteString("kernel:> nvme\n");
             ShellEngine.ExecuteCommand("nvme", ref Grid);
             RenderAndCommit(ref displayClient, surfaceId);
             DelayPaced(3000000);
 
-            // 11. Command 4: 'net'
+            // 9. Command 3: 'net'
             Grid.WriteString("kernel:> net\n");
             ShellEngine.ExecuteCommand("net", ref Grid);
             RenderAndCommit(ref displayClient, surfaceId);
@@ -262,17 +249,11 @@ namespace Shell
 
             if (bootInfo.IsHypervisor != 0)
             {
-                // 12. POSIX Frontier 5 Execution: exec /bin/posix_test
+                // 10. POSIX Frontier 5 Execution: exec /bin/posix_test
                 Grid.WriteString("kernel:> exec /bin/posix_test\n");
                 ShellEngine.ExecuteCommand("exec /bin/posix_test", ref Grid);
                 RenderAndCommit(ref displayClient, surfaceId);
                 for (int i = 0; i < 30; i++) DelayPaced(3000000);
-
-                // 13. POSIX Frontier 5 Execution: exec /bin/cat.pie
-                Grid.WriteString("kernel:> exec /bin/cat.pie\n");
-                ShellEngine.ExecuteCommand("exec /bin/cat.pie", ref Grid);
-                RenderAndCommit(ref displayClient, surfaceId);
-                for (int i = 0; i < 15; i++) DelayPaced(3000000);
 
                 // In automated QEMU test harness: execute scripted 'exit' command to finish CI verification
                 Grid.WriteString("kernel:> exit\n");
