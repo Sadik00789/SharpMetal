@@ -255,6 +255,12 @@ namespace Shell
                 RenderAndCommit(ref displayClient, surfaceId);
                 for (int i = 0; i < 30; i++) DelayPaced(3000000);
 
+                // 11. POSIX Frontier 5 Execution: exec /bin/cat.pie
+                Grid.WriteString("kernel:> exec /bin/cat.pie\n");
+                ShellEngine.ExecuteCommand("exec /bin/cat.pie", ref Grid);
+                RenderAndCommit(ref displayClient, surfaceId);
+                for (int i = 0; i < 15; i++) DelayPaced(3000000);
+
                 // In automated QEMU test harness: execute scripted 'exit' command to finish CI verification
                 Grid.WriteString("kernel:> exit\n");
                 RenderAndCommit(ref displayClient, surfaceId);
