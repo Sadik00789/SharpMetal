@@ -50,7 +50,8 @@ namespace PciServer.Pci
             if ((status & (1 << 4)) == 0) return; // Capabilities List bit not set
 
             byte capPtr = *(cfg + 0x34);
-            while (capPtr >= 0x40 && capPtr <= 0xFC)
+            int maxCaps = 48;
+            while (capPtr >= 0x40 && capPtr <= 0xFC && (capPtr & 3) == 0 && maxCaps-- > 0)
             {
                 byte capId = *(cfg + capPtr);
                 byte nextPtr = *(cfg + capPtr + 1);
@@ -58,6 +59,7 @@ namespace PciServer.Pci
                 if (capId == 0x05) dev->MsiOffset = capPtr;
                 else if (capId == 0x11) dev->MsiXOffset = capPtr;
 
+                if (nextPtr == capPtr) break;
                 capPtr = nextPtr;
             }
         }
@@ -99,17 +101,20 @@ namespace PciServer.Pci
             byte bir = (byte)(tableReg & 0x07);
             uint tableOffset = tableReg & ~0x07U;
 
-            ulong barPhys = GetBar(dev->Bus, dev->Device, dev->Function, bir);
-            if (barPhys != 0)
-            {
-                ulong tableVirt = 0x2C000000UL + ((ulong)bir * 0x100000UL);
-                SyscallWrappers.MapMmio(barPhys, tableVirt, 65536, writeCombining: false);
+            if (bir > 5 || tableOffset > 0x000FFFE0U) return false;
 
-                byte* tableEntry = (byte*)(tableVirt + tableOffset);
-                *(ulong*)(tableEntry + 0) = 0xFEE00000UL | ((ulong)apicId << 12); // Msg Addr
-                *(uint*)(tableEntry + 8) = vector;                                 // Msg Data
-                *(uint*)(tableEntry + 12) = 0;                                     // Vector Control (unmasked)
-            }
+            ulong barPhys = GetBar(dev->Bus, dev->Device, dev->Function, bir);
+            if (barPhys == 0) return false;
+
+            ulong tableVirt = 0x2C000000UL + ((ulong)bir * 0x100000UL);
+            ulong pageOff = tableOffset & ~0xFFFUL;
+            ulong endOff = (tableOffset + 16UL + 4095UL) & ~4095UL;
+            SyscallWrappers.MapMmio(barPhys + pageOff, tableVirt + pageOff, endOff - pageOff, writeCombining: false);
+
+            byte* tableEntry = (byte*)(tableVirt + tableOffset);
+            *(ulong*)(tableEntry + 0) = 0xFEE00000UL | ((ulong)apicId << 12); // Msg Addr
+            *(uint*)(tableEntry + 8) = vector;                                 // Msg Data
+            *(uint*)(tableEntry + 12) = 0;                                     // Vector Control (unmasked)
 
             // Enable MSI-X (bit 15 = 1, bit 14 Function Mask = 0)
             *(ushort*)(cfg + msix + 2) = (ushort)((msgCtrl | 0x8000) & ~0x4000);
@@ -418,16 +423,19 @@ namespace PciServer.Pci
 
         public static ulong GetBar(uint bus, uint dev, uint func, uint barIndex)
         {
+            if (bus >= 4 || dev >= 32 || func >= 8 || barIndex > 5) return 0;
+
             if (EcamVirtBase != 0)
             {
                 ulong offset = (bus << 20) | (dev << 15) | (func << 12);
                 byte* config = (byte*)(EcamVirtBase + offset);
                 uint barOffset = 0x10 + (barIndex * 4);
                 uint bar0 = *(uint*)(config + barOffset);
-                uint bar1 = *(uint*)(config + barOffset + 4);
+                if ((bar0 & 0x01) != 0) return 0; // Skip I/O BARs
                 ulong mmioPhys = (bar0 & ~0xFUL);
-                if ((bar0 & 0x06) == 0x04)
+                if ((bar0 & 0x06) == 0x04 && barIndex < 5)
                 {
+                    uint bar1 = *(uint*)(config + barOffset + 4);
                     mmioPhys |= ((ulong)bar1 << 32);
                 }
                 return mmioPhys;

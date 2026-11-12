@@ -102,12 +102,13 @@ namespace NetVirtio
                 {
                     byte capOffset = netConfig[0x34];
                     int maxCaps = 48;
-                    while (capOffset >= 0x40 && maxCaps-- > 0)
+                    while (capOffset >= 0x40 && capOffset <= 0xFC && (capOffset & 3) == 0 && maxCaps-- > 0)
                     {
                         byte capId = netConfig[capOffset];
                         byte nextCap = netConfig[capOffset + 1];
+                        byte capLen = netConfig[capOffset + 2];
 
-                        if (capId == 0x09) // Vendor-Specific Capability
+                        if (capId == 0x09 && capOffset <= 0xF0 && capLen >= 16) // Vendor-Specific Capability
                         {
                             byte cfgType = netConfig[capOffset + 3];
                             byte bar = netConfig[capOffset + 4];
@@ -117,27 +118,47 @@ namespace NetVirtio
                             if (bar <= 5)
                             {
                                 uint barVal = *(uint*)(netConfig + 0x10 + (bar * 4));
-                                ulong barPhys = barVal & ~0xFUL;
-                                if (barPhys != 0)
+                                if ((barVal & 0x01) == 0) // MMIO BAR only (skip I/O space BARs)
                                 {
-                                    ulong barVirt = 0x2A000000UL + ((ulong)bar * 0x00100000UL);
-                                    SyscallWrappers.MapMmio(barPhys, barVirt, 65536, writeCombining: false);
-
-                                    byte* targetPtr = (byte*)(barVirt + offset);
-                                    switch (cfgType)
+                                    ulong barPhys = barVal & ~0xFUL;
+                                    if ((barVal & 0x06) == 0x04 && bar < 5)
                                     {
-                                        case 1: CommonCfg = targetPtr; break;
-                                        case 2:
-                                            NotifyCfg = targetPtr;
-                                            NotifyOffMultiplier = *(uint*)(netConfig + capOffset + 16);
-                                            break;
-                                        case 3: IsrCfg = targetPtr; break;
-                                        case 4: DeviceCfg = targetPtr; break;
+                                        uint barHigh = *(uint*)(netConfig + 0x10 + ((bar + 1) * 4));
+                                        barPhys |= ((ulong)barHigh << 32);
+                                    }
+
+                                    ulong span = length != 0 ? (ulong)length : 4096UL;
+                                    if (cfgType == 2 && span < 4096UL) span = 4096UL;
+                                    if (barPhys != 0 && offset < 0x00100000UL && span <= 0x00100000UL - offset)
+                                    {
+                                        ulong pageOff = offset & ~0xFFFUL;
+                                        ulong endOff = ((ulong)offset + span + 4095UL) & ~4095UL;
+                                        if (endOff <= 0x00100000UL && endOff > pageOff)
+                                        {
+                                            ulong barVirt = 0x2A000000UL + ((ulong)bar * 0x00100000UL);
+                                            SyscallWrappers.MapMmio(barPhys + pageOff, barVirt + pageOff, endOff - pageOff, writeCombining: false);
+
+                                            byte* targetPtr = (byte*)(barVirt + offset);
+                                            switch (cfgType)
+                                            {
+                                                case 1: CommonCfg = targetPtr; break;
+                                                case 2:
+                                                    if (capLen >= 20 && capOffset <= 0xEC)
+                                                    {
+                                                        NotifyCfg = targetPtr;
+                                                        NotifyOffMultiplier = *(uint*)(netConfig + capOffset + 16);
+                                                    }
+                                                    break;
+                                                case 3: IsrCfg = targetPtr; break;
+                                                case 4: DeviceCfg = targetPtr; break;
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
 
+                        if (nextCap == capOffset) break;
                         capOffset = nextCap;
                     }
                 }
@@ -166,6 +187,16 @@ namespace NetVirtio
 
             s_rxBuffersPhys = SyscallWrappers.AllocDma(65536, 0x27100000UL);
             s_rxBuffersVirt = (byte*)0x27100000UL;
+
+            if (s_rxRingPhys == 0 || s_txRingPhys == 0 || s_txPacketPhys == 0 || s_rxBuffersPhys == 0)
+            {
+                SyscallWrappers.Log("[VIRTIO-NET] ERROR: Failed to allocate DMA rings/buffers.\n");
+                s_rxRingVirt = null;
+                s_txRingVirt = null;
+                s_txPacketVirt = null;
+                s_rxBuffersVirt = null;
+                return;
+            }
 
             for (int i = 0; i < 4096; i++)
             {
@@ -271,9 +302,12 @@ namespace NetVirtio
         {
             if (outMacBufferPhys != 0)
             {
+                ulong pagePhys = outMacBufferPhys & ~0xFFFUL;
+                ulong pageOff = outMacBufferPhys & 0xFFFUL;
+                ulong mapSize = (pageOff + 6UL + 4095UL) & ~4095UL;
                 ulong tempVirt = 0x28000000UL;
-                SyscallWrappers.MapMmio(outMacBufferPhys, tempVirt, 4096, writeCombining: false);
-                byte* dst = (byte*)tempVirt;
+                SyscallWrappers.MapMmio(pagePhys, tempVirt, mapSize, writeCombining: false);
+                byte* dst = (byte*)(tempVirt + pageOff);
                 dst[0] = Mac0;
                 dst[1] = Mac1;
                 dst[2] = Mac2;
@@ -346,10 +380,14 @@ namespace NetVirtio
         {
             if (packetPhys == 0 || length == 0) return 0;
 
+            uint sendLen = length > 1514U ? 1514U : length;
+            ulong pagePhys = packetPhys & ~0xFFFUL;
+            ulong pageOff = packetPhys & 0xFFFUL;
+            ulong mapSize = (pageOff + sendLen + 4095UL) & ~4095UL;
             ulong clientVirt = 0x27030000UL;
-            SyscallWrappers.MapMmio(packetPhys, clientVirt, 4096, writeCombining: false);
-            SendRawFrame((byte*)clientVirt, length);
-            return length;
+            SyscallWrappers.MapMmio(pagePhys, clientVirt, mapSize, writeCombining: false);
+            SendRawFrame((byte*)(clientVirt + pageOff), sendLen);
+            return sendLen;
         }
 
         public static void ProcessRxPackets()

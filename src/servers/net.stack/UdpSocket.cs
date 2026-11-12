@@ -88,7 +88,7 @@ namespace NetStack
 
         public static uint SendTo(int sockId, uint dstIp, ushort dstPort, byte* data, ushort len)
         {
-            if (sockId < 0 || sockId >= MaxSockets || data == null || len == 0) return 0;
+            if (sockId < 0 || sockId >= MaxSockets || data == null || len == 0 || len > 1472) return 0;
             UdpSocketEntry* s = GetSocket(sockId);
             if (!s->InUse) return 0;
             if (s->LocalPort == 0) s->LocalPort = AllocateEphemeralPort();

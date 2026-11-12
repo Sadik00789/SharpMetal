@@ -45,6 +45,7 @@ namespace NetStack
 
             ushort totalLen = BinaryPrimitives.ReverseEndianness(*(ushort*)(ipPacket + 2));
             if (totalLen > length) totalLen = (ushort)length;
+            if (totalLen < ihl) return;
 
             byte protocol = ipPacket[9];
             uint srcIp = *(uint*)(ipPacket + 12);
@@ -72,7 +73,7 @@ namespace NetStack
 
         private static void ProcessIcmp(byte* icmpPacket, uint length, uint srcIp, uint dstIp, byte* srcMac)
         {
-            if (length < 8) return;
+            if (length < 8 || length > 1480) return;
 
             byte type = icmpPacket[0];
             byte code = icmpPacket[1];
@@ -119,6 +120,9 @@ namespace NetStack
 
         public static void SendIpv4Packet(uint destIp, byte protocol, byte* payload, ushort payloadLen)
         {
+            if (payloadLen > 1480) return;
+            if (payloadLen > 0 && payload == null) return;
+
             byte* targetMac = stackalloc byte[6];
             if (!ArpTable.Lookup(destIp, targetMac))
             {

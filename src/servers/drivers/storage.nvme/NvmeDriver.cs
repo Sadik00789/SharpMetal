@@ -117,27 +117,35 @@ namespace StorageNvme
             // 4. Strict 4 KiB Physical Alignment for NVMe Queues (Constraint 3)
             // Allocate contiguous 4096-byte aligned frames from DMA arena
             AsqPhys = SyscallWrappers.AllocDma(4096, 0x71000000UL);
+            AcqPhys = SyscallWrappers.AllocDma(4096, 0x71001000UL);
+            IosqPhys = SyscallWrappers.AllocDma(4096, 0x71002000UL);
+            IocqPhys = SyscallWrappers.AllocDma(4096, 0x71003000UL);
+            IoBufferPhys = SyscallWrappers.AllocDma(4096, 0x71004000UL);
+            PrpListPhys = SyscallWrappers.AllocDma(4096, 0x71005000UL);
+
+            if (AsqPhys == 0 || AcqPhys == 0 || IosqPhys == 0 || IocqPhys == 0 || IoBufferPhys == 0 || PrpListPhys == 0)
+            {
+                SyscallWrappers.Log("[NVME] ERROR: Failed to allocate DMA queue/buffer memory.\n");
+                Bar0 = null;
+                return;
+            }
+
             Asq = (NvmeSqe*)0x71000000UL;
             ZeroMemory((byte*)Asq, 4096);
 
-            AcqPhys = SyscallWrappers.AllocDma(4096, 0x71001000UL);
             Acq = (NvmeCqe*)0x71001000UL;
             ZeroMemory((byte*)Acq, 4096);
 
-            IosqPhys = SyscallWrappers.AllocDma(4096, 0x71002000UL);
             Iosq = (NvmeSqe*)0x71002000UL;
             ZeroMemory((byte*)Iosq, 4096);
 
-            IocqPhys = SyscallWrappers.AllocDma(4096, 0x71003000UL);
             Iocq = (NvmeCqe*)0x71003000UL;
             ZeroMemory((byte*)Iocq, 4096);
 
-            IoBufferPhys = SyscallWrappers.AllocDma(4096, 0x71004000UL);
             IoBuffer = (byte*)0x71004000UL;
             ZeroMemory(IoBuffer, 4096);
 
             // PRP-list arena: one page holds 512 addresses (up to 2 MiB transfer)
-            PrpListPhys = SyscallWrappers.AllocDma(4096, 0x71005000UL);
             PrpList = (ulong*)0x71005000UL;
             ZeroMemory((byte*)PrpList, 4096);
 
@@ -156,8 +164,14 @@ namespace StorageNvme
             {
                 SyscallWrappers.Yield();
             }
+            if (readyTimeout <= 0)
+            {
+                SyscallWrappers.Log("[NVME] ERROR: Controller ready timeout.\n");
+                Bar0 = null;
+                return;
+            }
 
-            // 6. Create I/O Completion Queue (QID 1)
+            // 6. Create I/O Completion Queue (QID 1, polling mode: PC=1, IEN=0)
             uint sq0Db = NvmeRegisters.GetDoorbellOffset(0, isCq: false, Dstrd);
             uint cq0Db = NvmeRegisters.GetDoorbellOffset(0, isCq: true, Dstrd);
 
@@ -165,13 +179,20 @@ namespace StorageNvme
             Asq[0].CommandId = 1;
             Asq[0].Prp1 = IocqPhys;
             Asq[0].Cdw10 = (63U << 16) | 1U; // 64 entries, QID 1
-            Asq[0].Cdw11 = (0x30U << 16) | 0x03; // Interrupts enabled (bit 1), Vector 0x30, Physically contiguous (bit 0)
+            Asq[0].Cdw11 = 0x01U; // Physically contiguous (bit 0), polling (IEN=0)
+            System.Threading.Thread.MemoryBarrier();
             *(uint*)(Bar0 + sq0Db) = 1;
 
             int qTimeout = 100000;
             while ((Acq[0].Status & 1) == 0 && --qTimeout > 0)
             {
                 SyscallWrappers.Yield();
+            }
+            if (qTimeout <= 0 || (Acq[0].Status & 0xFFFE) != 0)
+            {
+                SyscallWrappers.Log("[NVME] ERROR: Create I/O CQ failed.\n");
+                Bar0 = null;
+                return;
             }
             *(uint*)(Bar0 + cq0Db) = 1;
 
@@ -181,12 +202,19 @@ namespace StorageNvme
             Asq[1].Prp1 = IosqPhys;
             Asq[1].Cdw10 = (63U << 16) | 1U; // 64 entries, QID 1
             Asq[1].Cdw11 = (1U << 16) | 0x01; // CQID 1, physically contiguous
+            System.Threading.Thread.MemoryBarrier();
             *(uint*)(Bar0 + sq0Db) = 2;
 
             qTimeout = 100000;
             while ((Acq[1].Status & 1) == 0 && --qTimeout > 0)
             {
                 SyscallWrappers.Yield();
+            }
+            if (qTimeout <= 0 || (Acq[1].Status & 0xFFFE) != 0)
+            {
+                SyscallWrappers.Log("[NVME] ERROR: Create I/O SQ failed.\n");
+                Bar0 = null;
+                return;
             }
             *(uint*)(Bar0 + cq0Db) = 2;
 
@@ -268,9 +296,17 @@ namespace StorageNvme
             }
         }
 
-        public static ulong ReadBlock(ulong lba, ulong shmPhysOrVirt)
+        private static ulong ExecuteIoCommand(byte opcode, ulong lba, ulong bufPhys, uint blockCount)
         {
-            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
+            if (Bar0 == null || Iosq == null || Iocq == null || PrpList == null) return 1;
+            if (bufPhys == 0 || blockCount == 0) return 1;
+
+            ulong byteLen = (ulong)blockCount * 512UL;
+            ulong off = bufPhys & 0xFFFUL;
+            ulong pages = (off + byteLen + 4095UL) / 4096UL;
+            if (pages > 513) return 1;
+
+            BuildPrp(bufPhys, byteLen, out ulong prp1, out ulong prp2);
 
             uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
             uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
@@ -278,24 +314,22 @@ namespace StorageNvme
             uint sqIdx = s_iosqTail & QueueMask;
             uint cqIdx = s_iocqHead & QueueMask;
 
-            ulong prp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
-            BuildPrp(prp1, 512, out ulong bPrp1, out ulong bPrp2);
-            Iosq[sqIdx].Opcode = NvmeOpcodes.Read;
+            Iosq[sqIdx].Opcode = opcode;
             Iosq[sqIdx].CommandId = s_cmdId++;
             Iosq[sqIdx].Nsid = 1;
             Iosq[sqIdx].Flags = 0;
             Iosq[sqIdx].Metadata = 0;
-            Iosq[sqIdx].Prp1 = bPrp1;
-            Iosq[sqIdx].Prp2 = bPrp2;
+            Iosq[sqIdx].Prp1 = prp1;
+            Iosq[sqIdx].Prp2 = prp2;
             Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
             Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
-            Iosq[sqIdx].Cdw12 = 0; // 1 block
+            Iosq[sqIdx].Cdw12 = blockCount - 1;
             Iosq[sqIdx].Cdw13 = 0;
             Iosq[sqIdx].Cdw14 = 0;
             Iosq[sqIdx].Cdw15 = 0;
 
             System.Threading.Thread.MemoryBarrier();
-            s_iosqTail++;
+            s_iosqTail = (s_iosqTail + 1) & QueueMask;
             *(uint*)(Bar0 + sq1Db) = s_iosqTail;
 
             int timeout = 100000;
@@ -305,131 +339,36 @@ namespace StorageNvme
             }
             if (timeout <= 0) return 2;
 
-            s_iocqHead++;
-            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
+            System.Threading.Thread.MemoryBarrier();
+            ushort cqeStatus = Iocq[cqIdx].Status;
+
+            s_iocqHead = (s_iocqHead + 1) & QueueMask;
+            if (s_iocqHead == 0) s_iocqPhase ^= 1;
             *(uint*)(Bar0 + cq1Db) = s_iocqHead;
 
-            return 0;
+            return (cqeStatus & 0xFFFE) != 0 ? 3UL : 0UL;
+        }
+
+        public static ulong ReadBlock(ulong lba, ulong shmPhysOrVirt)
+        {
+            ulong targetPhys = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
+            return ExecuteIoCommand(NvmeOpcodes.Read, lba, targetPhys, 1);
         }
 
         public static ulong WriteBlock(ulong lba, ulong shmPhysOrVirt)
         {
-            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
-
-            uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
-            uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
-
-            uint sqIdx = s_iosqTail & QueueMask;
-            uint cqIdx = s_iocqHead & QueueMask;
-
-            ulong writePrp1 = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
-            BuildPrp(writePrp1, 512, out ulong bPrp1, out ulong bPrp2);
-            Iosq[sqIdx].Opcode = NvmeOpcodes.Write;
-            Iosq[sqIdx].CommandId = s_cmdId++;
-            Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Flags = 0;
-            Iosq[sqIdx].Metadata = 0;
-            Iosq[sqIdx].Prp1 = bPrp1;
-            Iosq[sqIdx].Prp2 = bPrp2;
-            Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
-            Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
-            Iosq[sqIdx].Cdw12 = 0; // 1 block
-            Iosq[sqIdx].Cdw13 = 0;
-            Iosq[sqIdx].Cdw14 = 0;
-            Iosq[sqIdx].Cdw15 = 0;
-
-            System.Threading.Thread.MemoryBarrier();
-            s_iosqTail++;
-            *(uint*)(Bar0 + sq1Db) = s_iosqTail;
-
-            int timeout = 100000;
-            while ((Iocq[cqIdx].Status & 1) != s_iocqPhase && --timeout > 0)
-            {
-                SyscallWrappers.Yield();
-            }
-            if (timeout <= 0) return 2;
-
-            s_iocqHead++;
-            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
-            *(uint*)(Bar0 + cq1Db) = s_iocqHead;
-
-            return 0;
+            ulong targetPhys = (shmPhysOrVirt != 0) ? shmPhysOrVirt : IoBufferPhys;
+            return ExecuteIoCommand(NvmeOpcodes.Write, lba, targetPhys, 1);
         }
 
         public static ulong ReadBlocks(ulong lba, ulong bufPhys, uint blockCount)
         {
-            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
-            if (blockCount == 0) return 1;
-            ulong byteLen = (ulong)blockCount * 512UL;
-            ulong off = bufPhys & 0xFFFUL;
-            ulong pages = (off + byteLen + 4095UL) / 4096UL;
-            if (pages > 513) return 1;
-            BuildPrp(bufPhys, byteLen, out ulong prp1, out ulong prp2);
-            uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
-            uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
-            uint sqIdx = s_iosqTail & QueueMask;
-            uint cqIdx = s_iocqHead & QueueMask;
-            Iosq[sqIdx].Opcode = NvmeOpcodes.Read;
-            Iosq[sqIdx].CommandId = s_cmdId++;
-            Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Flags = 0;
-            Iosq[sqIdx].Metadata = 0;
-            Iosq[sqIdx].Prp1 = prp1;
-            Iosq[sqIdx].Prp2 = prp2;
-            Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
-            Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
-            Iosq[sqIdx].Cdw12 = blockCount - 1;
-            Iosq[sqIdx].Cdw13 = 0;
-            Iosq[sqIdx].Cdw14 = 0;
-            Iosq[sqIdx].Cdw15 = 0;
-            System.Threading.Thread.MemoryBarrier();
-            s_iosqTail++;
-            *(uint*)(Bar0 + sq1Db) = s_iosqTail;
-            int timeout = 100000;
-            while ((Iocq[cqIdx].Status & 1) != s_iocqPhase && --timeout > 0) SyscallWrappers.Yield();
-            if (timeout <= 0) return 2;
-            s_iocqHead++;
-            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
-            *(uint*)(Bar0 + cq1Db) = s_iocqHead;
-            return 0;
+            return ExecuteIoCommand(NvmeOpcodes.Read, lba, bufPhys, blockCount);
         }
 
         public static ulong WriteBlocks(ulong lba, ulong bufPhys, uint blockCount)
         {
-            if (Bar0 == null || Iosq == null || Iocq == null) return 1;
-            if (blockCount == 0) return 1;
-            ulong byteLen = (ulong)blockCount * 512UL;
-            ulong off = bufPhys & 0xFFFUL;
-            ulong pages = (off + byteLen + 4095UL) / 4096UL;
-            if (pages > 513) return 1;
-            BuildPrp(bufPhys, byteLen, out ulong prp1, out ulong prp2);
-            uint sq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: false, Dstrd);
-            uint cq1Db = NvmeRegisters.GetDoorbellOffset(1, isCq: true, Dstrd);
-            uint sqIdx = s_iosqTail & QueueMask;
-            uint cqIdx = s_iocqHead & QueueMask;
-            Iosq[sqIdx].Opcode = NvmeOpcodes.Write;
-            Iosq[sqIdx].CommandId = s_cmdId++;
-            Iosq[sqIdx].Nsid = 1;
-            Iosq[sqIdx].Flags = 0;
-            Iosq[sqIdx].Metadata = 0;
-            Iosq[sqIdx].Prp1 = prp1;
-            Iosq[sqIdx].Prp2 = prp2;
-            Iosq[sqIdx].Cdw10 = (uint)(lba & 0xFFFFFFFF);
-            Iosq[sqIdx].Cdw11 = (uint)(lba >> 32);
-            Iosq[sqIdx].Cdw12 = blockCount - 1;
-            Iosq[sqIdx].Cdw13 = 0;
-            Iosq[sqIdx].Cdw14 = 0;
-            Iosq[sqIdx].Cdw15 = 0;
-            System.Threading.Thread.MemoryBarrier();
-            s_iosqTail++;
-            *(uint*)(Bar0 + sq1Db) = s_iosqTail;
-            int timeout = 100000;
-            while ((Iocq[cqIdx].Status & 1) != s_iocqPhase && --timeout > 0) SyscallWrappers.Yield();
-            if (timeout <= 0) return 2;
-            s_iocqHead++;
-            if ((s_iocqHead & QueueMask) == 0) s_iocqPhase ^= 1;
-            *(uint*)(Bar0 + cq1Db) = s_iocqHead;
-            return 0;
+            return ExecuteIoCommand(NvmeOpcodes.Write, lba, bufPhys, blockCount);
         }
 
         private static void ZeroMemory(byte* ptr, int count)

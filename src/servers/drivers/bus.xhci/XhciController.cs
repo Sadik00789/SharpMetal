@@ -735,8 +735,10 @@ namespace Xhci
                     WritePortSc(p, ps | XhciRegisters.PortPp);
                 }
             }
-            // ~20 ms of cooperative yielding for power-up and connect detect.
-            for (int i = 0; i < 200000; i++) SyscallWrappers.Yield();
+            // ~20 ms of cooperative yielding for bare-metal power-up settle;
+            // virtualized xHCI controllers assert PP/CCS synchronously.
+            int powerSettleIterations = IsHypervisor ? 10 : 200000;
+            for (int i = 0; i < powerSettleIterations; i++) SyscallWrappers.Yield();
         }
 
         /// <summary>Bounded wait for a port to report a connected device.</summary>

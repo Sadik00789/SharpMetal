@@ -58,6 +58,7 @@ namespace NetStack
             }
 
             if (sockType == SocketType.Udp) UdpSocket.Close(innerId);
+            else if (sockType == SocketType.Tcp) TcpSocket.Close(innerId);
             return 0;
         }
 
@@ -104,17 +105,26 @@ namespace NetStack
             SocketEntry* entry = GetEntry((int)(socketFd - 1));
             if (!entry->InUse) return 0;
 
+            uint sendLen = len > 4096U ? 4096U : len;
+            if (entry->Type == SocketType.Udp && sendLen > 1472U)
+            {
+                sendLen = 1472U;
+            }
+
+            ulong pagePhys = bufPhys & ~0xFFFUL;
+            ulong pageOff = bufPhys & 0xFFFUL;
+            ulong mapSize = (pageOff + sendLen + 4095UL) & ~4095UL;
             ulong clientVirt = 0x27040000UL;
-            SyscallWrappers.MapMmio(bufPhys, clientVirt, 4096, writeCombining: false);
-            byte* data = (byte*)clientVirt;
+            SyscallWrappers.MapMmio(pagePhys, clientVirt, mapSize, writeCombining: false);
+            byte* data = (byte*)(clientVirt + pageOff);
 
             if (entry->Type == SocketType.Udp)
             {
-                return UdpSocket.SendTo(entry->InnerId, ArpTable.GatewayIp, 8080, data, (ushort)len);
+                return UdpSocket.SendTo(entry->InnerId, ArpTable.GatewayIp, 8080, data, (ushort)sendLen);
             }
             if (entry->Type == SocketType.Tcp)
             {
-                return TcpSocket.Send(entry->InnerId, data, len);
+                return TcpSocket.Send(entry->InnerId, data, sendLen);
             }
             return 0;
         }
@@ -125,17 +135,21 @@ namespace NetStack
             SocketEntry* entry = GetEntry((int)(socketFd - 1));
             if (!entry->InUse) return 0;
 
+            uint recvMax = maxLen > 4096U ? 4096U : maxLen;
+            ulong pagePhys = bufPhys & ~0xFFFUL;
+            ulong pageOff = bufPhys & 0xFFFUL;
+            ulong mapSize = (pageOff + recvMax + 4095UL) & ~4095UL;
             ulong clientVirt = 0x27050000UL;
-            SyscallWrappers.MapMmio(bufPhys, clientVirt, 4096, writeCombining: false);
-            byte* outBuf = (byte*)clientVirt;
+            SyscallWrappers.MapMmio(pagePhys, clientVirt, mapSize, writeCombining: false);
+            byte* outBuf = (byte*)(clientVirt + pageOff);
 
             if (entry->Type == SocketType.Udp)
             {
-                return UdpSocket.RecvFrom(entry->InnerId, outBuf, maxLen);
+                return UdpSocket.RecvFrom(entry->InnerId, outBuf, recvMax);
             }
             if (entry->Type == SocketType.Tcp)
             {
-                return TcpSocket.Recv(entry->InnerId, outBuf, maxLen);
+                return TcpSocket.Recv(entry->InnerId, outBuf, recvMax);
             }
             return 0;
         }

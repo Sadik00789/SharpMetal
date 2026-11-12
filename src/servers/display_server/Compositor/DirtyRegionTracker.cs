@@ -7,11 +7,11 @@ namespace DisplayServer.Compositor
             if (maxWidth == 0 || maxHeight == 0) return false;
             if (x >= maxWidth || y >= maxHeight) return false;
 
-            if (x + w > maxWidth)
+            if (w > maxWidth - x)
             {
                 w = maxWidth - x;
             }
-            if (y + h > maxHeight)
+            if (h > maxHeight - y)
             {
                 h = maxHeight - y;
             }
