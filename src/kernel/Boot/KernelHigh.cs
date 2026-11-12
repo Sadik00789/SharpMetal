@@ -45,6 +45,7 @@ namespace Kernel.Boot
         public static ulong InitrdSize;
 
         public static Endpoint* FsEndpoint;
+        public static ThreadControlBlock* RoottaskTcb;
 
         // Dedicated 16 KiB interrupt stack for TSS.RSP0
         [StructLayout(LayoutKind.Sequential, Size = 16384)]
@@ -528,6 +529,12 @@ namespace Kernel.Boot
                     0x00007FFFF0000000UL,
                     262144,
                     out userStackTop);
+                if (userPml4Phys == 0)
+                {
+                    EarlySerial.WriteLine("[ERROR] Failed to synthesize roottask address space!");
+                    PortIo.Out8(0xF4, 0x01);
+                    return;
+                }
 
                 EarlySerial.Write("[ROOTTASK] User address space synthesized (PML4: ");
                 EarlySerial.WriteHex(userPml4Phys);
@@ -588,6 +595,13 @@ namespace Kernel.Boot
 
                 // 4. Synthesize roottask thread
                 ThreadControlBlock* roottaskTcb = Scheduler.CreateThread(null, 0, enqueue: false);
+                if (roottaskTcb == null)
+                {
+                    EarlySerial.WriteLine("[ERROR] Failed to allocate roottask TCB!");
+                    PortIo.Out8(0xF4, 0x01);
+                    return;
+                }
+                RoottaskTcb = roottaskTcb;
                 roottaskTcb->CSpaceRoot = rootCNode;
                 roottaskTcb->Pml4Address = userPml4Phys;
                 // Slot 2: roottask TCB Capability (Read | Write | Call)
@@ -599,8 +613,14 @@ namespace Kernel.Boot
                 // at the kernel synthetic stack but is never switched to (iretq never returns).
                 roottaskTcb->UserRsp = userStackTop;
 
+                if (Scheduler.MainThread != null)
+                {
+                    Scheduler.MainThread->IsExecuting = 0;
+                    Scheduler.MainThread->State = ThreadState.Dead;
+                }
                 Scheduler.CurrentThread = roottaskTcb;
                 roottaskTcb->State = ThreadState.Running;
+                roottaskTcb->IsExecuting = 1;
                 TaskStateSegment.SetRsp0(roottaskTcb->KernelStackTop);
 
                 // 5. Jump to Ring 3 via iretq
@@ -612,8 +632,8 @@ namespace Kernel.Boot
                 ulong entryRip = RoottaskEntryPoint;
                 if (roottaskSize > 0x40 && roottaskPayload[0] == 0x4D && roottaskPayload[1] == 0x5A)
                 {
-                    uint e_lfanew = *(uint*)(roottaskPayload + 0x3C);
-                    if (e_lfanew + 40 < roottaskSize && *(uint*)(roottaskPayload + e_lfanew) == 0x00004550)
+                    ulong e_lfanew = *(uint*)(roottaskPayload + 0x3C);
+                    if (e_lfanew <= roottaskSize - 44 && *(uint*)(roottaskPayload + e_lfanew) == 0x00004550)
                     {
                         uint entryRva = *(uint*)(roottaskPayload + e_lfanew + 24 + 16);
                         entryRip = RoottaskImageBase + entryRva;

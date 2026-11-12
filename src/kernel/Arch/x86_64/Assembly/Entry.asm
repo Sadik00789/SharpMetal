@@ -370,6 +370,8 @@ ApEntry64:
     mov eax, [rdx]
     shr eax, 24
     movzx ecx, al          ; ecx = apicId (Windows x64 ABI)
+    cmp ecx, 16
+    jae .ap_halt
     movzx edi, al          ; edi = apicId (SysV AMD64 ABI)
 
     ; Fetch execution stack from ApInitialStacks[apicId]
@@ -378,9 +380,11 @@ ApEntry64:
     test rsp, rsp
     jz .ap_halt
     and rsp, -16
+    sub rsp, 32            ; Allocate 32-byte Win64 shadow space
 
     ; Call C# ApStartupHandler(ulong apicId)
     call ApStartupHandler
+    add rsp, 32
 
 .ap_halt:
     cli
@@ -394,8 +398,11 @@ GetApEntry64:
 
 global SetApInitialStack
 SetApInitialStack:
+    cmp rcx, 16
+    jae .set_ap_done
     lea r8, [rel ApInitialStacks]
     mov [r8 + rcx*8], rdx
+.set_ap_done:
     ret
 
 global GetApTrampolineBinary

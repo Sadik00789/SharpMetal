@@ -6,7 +6,7 @@ namespace Kernel.Memory.Physical
 {
     public static unsafe class PhysicalFrameRefcount
     {
-        public const int MaxFrames = 1048576; // Up to 4 GiB physical memory
+        public const int MaxFrames = 4194304; // Up to 16 GiB physical memory (matches EfiMain limit)
 
         [StructLayout(LayoutKind.Sequential, Size = MaxFrames * 2)]
         private struct RefcountStorage
@@ -32,7 +32,7 @@ namespace Kernel.Memory.Physical
         public static ushort Get(ulong phys)
         {
             ulong frame = phys / PageFrameAllocator.PageSize;
-            if (frame >= (ulong)MaxFrames || s_refcounts == null) return 1;
+            if (frame >= (ulong)MaxFrames || s_refcounts == null) return 2;
 
             ulong rflags = s_lock.Acquire();
             try
@@ -84,7 +84,7 @@ namespace Kernel.Memory.Physical
         public static ushort Decrement(ulong phys)
         {
             ulong frame = phys / PageFrameAllocator.PageSize;
-            if (frame >= (ulong)MaxFrames || s_refcounts == null) return 0;
+            if (frame >= (ulong)MaxFrames || s_refcounts == null) return 1;
 
             ulong rflags = s_lock.Acquire();
             try

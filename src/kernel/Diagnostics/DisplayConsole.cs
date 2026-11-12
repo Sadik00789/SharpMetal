@@ -210,15 +210,24 @@ namespace Kernel.Diagnostics
                 if (s_fb == null || s_fontData == null) return;
 
                 if (value == 0) { WriteCharInternal('0'); return; }
-                if (value < 0) { WriteCharInternal('-'); value = -value; }
+                ulong mag;
+                if (value < 0)
+                {
+                    WriteCharInternal('-');
+                    mag = (ulong)(-(value + 1)) + 1UL;
+                }
+                else
+                {
+                    mag = (ulong)value;
+                }
 
-                long divisor = 1;
-                while (value / divisor >= 10) divisor *= 10;
+                ulong divisor = 1;
+                while (mag / divisor >= 10) divisor *= 10;
                 while (divisor > 0)
                 {
-                    long digit = value / divisor;
+                    ulong digit = mag / divisor;
                     WriteCharInternal((char)('0' + digit));
-                    value %= divisor;
+                    mag %= divisor;
                     divisor /= 10;
                 }
             }

@@ -86,12 +86,14 @@ EnterUserMode:
 extern ReleaseSchedulerLock
 
 UserThreadTrampoline:
-    ; Release scheduler spinlock acquired during context switch
-    sub rsp, 32
-    mov rcx, 0x202
-    mov rdi, 0x202
+    ; Release scheduler spinlock acquired during context switch.
+    ; Enter here with rsp = stackTop - 40 (8 mod 16): subtract 40 to satisfy
+    ; 16-byte Win64 alignment + 32-byte shadow space, keeping IF=0 until iretq.
+    sub rsp, 40
+    mov rcx, 0x02
+    mov rdi, 0x02
     call ReleaseSchedulerLock
-    add rsp, 32
+    add rsp, 40
 
     cli
 

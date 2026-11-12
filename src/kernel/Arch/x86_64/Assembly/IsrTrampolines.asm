@@ -34,20 +34,47 @@ isr_common_stub:
     push rcx
     push rax
 
-    mov rcx, rsp       ; 1st parameter: InterruptContext*
+    mov rbx, rsp       ; Preserve InterruptContext* in Win64 callee-saved rbx
 
-    ; Ensure 16-byte stack alignment prior to calling C# DispatchInterrupt (prevents #GP on SIMD)
-    test rsp, 8
-    jz .aligned
-    sub rsp, 8         ; Align stack to 16 bytes
-    sub rsp, 32        ; Allocate 32-byte shadow space
+    ; Check CR4.OSXSAVE (bit 18) before using xsave64/xrstor64 (guards early boot exceptions)
+    mov rax, cr4
+    bt eax, 18
+    jnc .skip_xsave
+
+    ; Allocate 832-byte 64-byte-aligned XSAVE area for x87/SSE/AVX state
+    sub rsp, 832
+    and rsp, -64
+    xor eax, eax
+    mov [rsp + 512], rax
+    mov [rsp + 520], rax
+    mov [rsp + 528], rax
+    mov [rsp + 536], rax
+    mov [rsp + 544], rax
+    mov [rsp + 552], rax
+    mov [rsp + 560], rax
+    mov [rsp + 568], rax
+
+    mov eax, 7         ; RFBM = x87 | SSE | AVX
+    xor edx, edx
+    xsave64 [rsp]
+
+    mov rcx, rbx       ; 1st parameter: InterruptContext*
+    sub rsp, 32        ; 32-byte Win64 shadow space (rsp remains 16-byte aligned)
     call DispatchInterrupt
-    add rsp, 40        ; Restore shadow space (32) + alignment adjustment (8)
+    add rsp, 32
+
+    mov eax, 7
+    xor edx, edx
+    xrstor64 [rsp]
+    mov rsp, rbx
     jmp .done_dispatch
-.aligned:
-    sub rsp, 32        ; Allocate 32-byte shadow space
+
+.skip_xsave:
+    mov rcx, rbx       ; 1st parameter: InterruptContext*
+    and rsp, -16
+    sub rsp, 32        ; 32-byte Win64 shadow space
     call DispatchInterrupt
-    add rsp, 32        ; Restore shadow space
+    mov rsp, rbx
 .done_dispatch:
 
     ; Restore 15 GPRs in reverse order

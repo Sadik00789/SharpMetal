@@ -130,6 +130,12 @@ namespace Kernel.Memory.Virtual
 
         public static void MapUserPage4K(ulong* pml4, ulong virt, ulong phys, ulong flags)
         {
+            TryMapUserPage4K(pml4, virt, phys, flags);
+        }
+
+        public static bool TryMapUserPage4K(ulong* pml4, ulong virt, ulong phys, ulong flags)
+        {
+            if (pml4 == null) return false;
             // Assert that userland page mappings never set PTE_GLOBAL (bit 8)
             flags &= ~Paging.Global;
 
@@ -142,6 +148,7 @@ namespace Kernel.Memory.Virtual
             if ((pml4[pml4Idx] & Paging.Present) == 0)
             {
                 ulong pdptPhys = PageFrameAllocator.AllocateFrame();
+                if (pdptPhys == 0) return false;
                 pdpt = (ulong*)Hhdm.PhysicalToVirtual(pdptPhys);
                 ZeroPage(pdpt);
                 pml4[pml4Idx] = pdptPhys | Paging.Present | Paging.Writable | Paging.User;
@@ -157,6 +164,7 @@ namespace Kernel.Memory.Virtual
             if ((pdpt[pdptIdx] & Paging.Present) == 0)
             {
                 ulong pdPhys = PageFrameAllocator.AllocateFrame();
+                if (pdPhys == 0) return false;
                 pd = (ulong*)Hhdm.PhysicalToVirtual(pdPhys);
                 ZeroPage(pd);
                 pdpt[pdptIdx] = pdPhys | Paging.Present | Paging.Writable | Paging.User;
@@ -172,6 +180,7 @@ namespace Kernel.Memory.Virtual
             if ((pd[pdIdx] & Paging.Present) == 0)
             {
                 ulong ptPhys = PageFrameAllocator.AllocateFrame();
+                if (ptPhys == 0) return false;
                 pt = (ulong*)Hhdm.PhysicalToVirtual(ptPhys);
                 ZeroPage(pt);
                 pd[pdIdx] = ptPhys | Paging.Present | Paging.Writable | Paging.User;
@@ -184,6 +193,7 @@ namespace Kernel.Memory.Virtual
             }
 
             pt[ptIdx] = (phys & Paging.AddressMask) | flags;
+            return true;
         }
 
         public static ulong CreateUserAddressSpace(
@@ -195,7 +205,15 @@ namespace Kernel.Memory.Virtual
             ulong userStackSize,
             out ulong userStackTop)
         {
+            userStackTop = 0;
+            if (kernelPml4Phys == 0) return 0;
+            if (payloadSize > 0 && payload == null) return 0;
+            if (entryVirt >= Hhdm.Base || userStackVirt >= Hhdm.Base) return 0;
+            if (userStackSize < 64 || userStackSize > Hhdm.Base - userStackVirt) return 0;
+            if (payloadSize > Hhdm.Base - entryVirt) return 0;
+
             ulong userPml4Phys = PageFrameAllocator.AllocateFrame();
+            if (userPml4Phys == 0) return 0;
             ulong* userPml4 = (ulong*)Hhdm.PhysicalToVirtual(userPml4Phys);
             ZeroPage(userPml4);
 
@@ -207,19 +225,35 @@ namespace Kernel.Memory.Virtual
 
             if (payloadSize > 0x40 && payload[0] == 0x4D && payload[1] == 0x5A)
             {
-                uint e_lfanew = *(uint*)(payload + 0x3C);
-                if (e_lfanew < payloadSize && *(uint*)(payload + e_lfanew) == 0x00004550)
+                ulong e_lfanew = *(uint*)(payload + 0x3C);
+                if (e_lfanew <= payloadSize - 24 && *(uint*)(payload + e_lfanew) == 0x00004550)
                 {
                     ulong hdrFramePhys = PageFrameAllocator.AllocateFrame();
+                    if (hdrFramePhys == 0)
+                    {
+                        DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
                     byte* hdrFrameVirt = (byte*)Hhdm.PhysicalToVirtual(hdrFramePhys);
                     ZeroPage((ulong*)hdrFrameVirt);
                     ulong hdrCopy = payloadSize < 4096 ? payloadSize : 4096;
                     for (ulong b = 0; b < hdrCopy; b++) hdrFrameVirt[b] = payload[b];
-                    MapUserPage4K(userPml4, entryVirt, hdrFramePhys, Paging.Present | Paging.Writable | Paging.User);
+                    if (!TryMapUserPage4K(userPml4, entryVirt, hdrFramePhys, Paging.Present | Paging.Writable | Paging.User))
+                    {
+                        PageFrameAllocator.FreeFrame(hdrFramePhys);
+                        DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
 
                     ushort numSections = *(ushort*)(payload + e_lfanew + 6);
                     ushort optSize = *(ushort*)(payload + e_lfanew + 20);
-                    byte* secHeaders = payload + e_lfanew + 24 + optSize;
+                    ulong secTableOff = e_lfanew + 24UL + (ulong)optSize;
+                    if (numSections > 96 || secTableOff > payloadSize || (ulong)numSections * 40UL > payloadSize - secTableOff)
+                    {
+                        DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
+                    byte* secHeaders = payload + secTableOff;
 
                     for (int i = 0; i < numSections; i++)
                     {
@@ -229,19 +263,37 @@ namespace Kernel.Memory.Virtual
                         uint rawSize = *(uint*)(sec + 16);
                         uint rawOffset = *(uint*)(sec + 20);
 
-                        uint allocSize = vSize > rawSize ? vSize : rawSize;
+                        if (rawSize > 0 && ((ulong)rawOffset > payloadSize || (ulong)rawSize > payloadSize - (ulong)rawOffset))
+                        {
+                            DestroyAddressSpace(userPml4Phys);
+                            return 0;
+                        }
+                        ulong allocSize = vSize > rawSize ? (ulong)vSize : (ulong)rawSize;
+                        if (allocSize > Hhdm.Base || (ulong)vAddr > Hhdm.Base - entryVirt || allocSize > Hhdm.Base - (entryVirt + (ulong)vAddr))
+                        {
+                            DestroyAddressSpace(userPml4Phys);
+                            return 0;
+                        }
                         ulong secPages = (allocSize + 4095) / 4096;
 
                         for (ulong p = 0; p < secPages; p++)
                         {
                             ulong framePhys = PageFrameAllocator.AllocateFrame();
+                            if (framePhys == 0)
+                            {
+                                DestroyAddressSpace(userPml4Phys);
+                                return 0;
+                            }
                             byte* frameVirt = (byte*)Hhdm.PhysicalToVirtual(framePhys);
                             ZeroPage((ulong*)frameVirt);
 
-                            ulong fileOffset = rawOffset + (p * 4096);
-                            if (fileOffset < rawOffset + rawSize && fileOffset < payloadSize)
+                            ulong rawEnd = (ulong)rawOffset + (ulong)rawSize;
+                            ulong fileOffset = (ulong)rawOffset + (p * 4096);
+                            if (fileOffset < rawEnd && fileOffset < payloadSize)
                             {
-                                ulong bytesLeft = (rawOffset + rawSize) - fileOffset;
+                                ulong bytesLeft = rawEnd - fileOffset;
+                                ulong payloadLeft = payloadSize - fileOffset;
+                                if (bytesLeft > payloadLeft) bytesLeft = payloadLeft;
                                 ulong toCopy = bytesLeft > 4096 ? 4096 : bytesLeft;
                                 for (ulong b = 0; b < toCopy; b++)
                                 {
@@ -249,8 +301,13 @@ namespace Kernel.Memory.Virtual
                                 }
                             }
 
-                            ulong pageVirt = entryVirt + vAddr + (p * 4096);
-                            MapUserPage4K(userPml4, pageVirt, framePhys, Paging.Present | Paging.Writable | Paging.User);
+                            ulong pageVirt = entryVirt + (ulong)vAddr + (p * 4096);
+                            if (!TryMapUserPage4K(userPml4, pageVirt, framePhys, Paging.Present | Paging.Writable | Paging.User))
+                            {
+                                PageFrameAllocator.FreeFrame(framePhys);
+                                DestroyAddressSpace(userPml4Phys);
+                                return 0;
+                            }
                         }
                     }
                 }
@@ -261,6 +318,11 @@ namespace Kernel.Memory.Virtual
                 for (ulong p = 0; p < pagesNeeded; p++)
                 {
                     ulong framePhys = PageFrameAllocator.AllocateFrame();
+                    if (framePhys == 0)
+                    {
+                        DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
                     byte* frameVirt = (byte*)Hhdm.PhysicalToVirtual(framePhys);
                     ZeroPage((ulong*)frameVirt);
 
@@ -272,7 +334,12 @@ namespace Kernel.Memory.Virtual
                     }
 
                     ulong pageVirt = entryVirt + offset;
-                    MapUserPage4K(userPml4, pageVirt, framePhys, Paging.Present | Paging.Writable | Paging.User);
+                    if (!TryMapUserPage4K(userPml4, pageVirt, framePhys, Paging.Present | Paging.Writable | Paging.User))
+                    {
+                        PageFrameAllocator.FreeFrame(framePhys);
+                        DestroyAddressSpace(userPml4Phys);
+                        return 0;
+                    }
                 }
             }
 
@@ -280,11 +347,21 @@ namespace Kernel.Memory.Virtual
             for (ulong s = 0; s < stackPages; s++)
             {
                 ulong stackPhys = PageFrameAllocator.AllocateFrame();
+                if (stackPhys == 0)
+                {
+                    DestroyAddressSpace(userPml4Phys);
+                    return 0;
+                }
                 byte* stackVirt = (byte*)Hhdm.PhysicalToVirtual(stackPhys);
                 ZeroPage((ulong*)stackVirt);
 
                 ulong pageVirt = userStackVirt + (s * 4096);
-                MapUserPage4K(userPml4, pageVirt, stackPhys, Paging.Present | Paging.Writable | Paging.User);
+                if (!TryMapUserPage4K(userPml4, pageVirt, stackPhys, Paging.Present | Paging.Writable | Paging.User))
+                {
+                    PageFrameAllocator.FreeFrame(stackPhys);
+                    DestroyAddressSpace(userPml4Phys);
+                    return 0;
+                }
             }
 
             userStackTop = (userStackVirt + userStackSize - 32) & ~15UL;
@@ -297,6 +374,7 @@ namespace Kernel.Memory.Virtual
                 AddVma(pcb, userStackVirt, userStackVirt + userStackSize, VmaProt.Read | VmaProt.Write, VmaType.Anonymous);
             }
 
+            PhysicalFrameRefcount.Set(userPml4Phys, 1);
             return userPml4Phys;
         }
 
@@ -487,7 +565,7 @@ namespace Kernel.Memory.Virtual
                     {
                         // 1GB page: free 262144 contiguous 4K frames if managed RAM.
                         ulong base1G = pdpte & Paging.AddressMask;
-                        if (PageFrameAllocator.IsRam(base1G))
+                        if (PageFrameAllocator.IsRam(base1G) && PhysicalFrameRefcount.Decrement(base1G) == 0)
                         {
                             PageFrameAllocator.FreeContiguousFrames(base1G, 262144);
                         }
@@ -512,7 +590,7 @@ namespace Kernel.Memory.Virtual
                         {
                             // 2MB page: free 512 contiguous frames if managed RAM.
                             ulong base2M = pde & Paging.AddressMask;
-                            if (PageFrameAllocator.IsRam(base2M))
+                            if (PageFrameAllocator.IsRam(base2M) && PhysicalFrameRefcount.Decrement(base2M) == 0)
                             {
                                 PageFrameAllocator.FreeContiguousFrames(base2M, 512);
                             }
@@ -533,7 +611,7 @@ namespace Kernel.Memory.Virtual
                             ulong pte = pt[ptIdx];
                             if ((pte & Paging.Present) == 0) continue;
                             ulong framePhys = pte & Paging.AddressMask;
-                            if (PageFrameAllocator.IsRam(framePhys))
+                            if (PageFrameAllocator.IsRam(framePhys) && PhysicalFrameRefcount.Decrement(framePhys) == 0)
                             {
                                 PageFrameAllocator.FreeFrame(framePhys);
                             }
@@ -541,24 +619,35 @@ namespace Kernel.Memory.Virtual
                         }
 
                         // Free the PT frame itself.
-                        PageFrameAllocator.FreeFrame(ptPhys);
+                        if (PageFrameAllocator.IsRam(ptPhys))
+                        {
+                            PageFrameAllocator.FreeFrame(ptPhys);
+                        }
                         pd[pdIdx] = 0;
                     }
 
                     // Free the PD frame.
-                    PageFrameAllocator.FreeFrame(pdPhys);
+                    if (PageFrameAllocator.IsRam(pdPhys))
+                    {
+                        PageFrameAllocator.FreeFrame(pdPhys);
+                    }
                     pdpt[pdptIdx] = 0;
                 }
 
                 // Free the PDPT frame.
-                PageFrameAllocator.FreeFrame(pdptPhys);
+                if (PageFrameAllocator.IsRam(pdptPhys))
+                {
+                    PageFrameAllocator.FreeFrame(pdptPhys);
+                }
                 pml4[pml4Idx] = 0;
             }
 
             // Finally free the PML4 frame itself (caller must have switched CR3 away).
-            if (PageFrameAllocator.IsRam(pml4Phys & ~0xFFFUL))
+            ulong pml4Aligned = pml4Phys & ~0xFFFUL;
+            if (PageFrameAllocator.IsRam(pml4Aligned))
             {
-                PageFrameAllocator.FreeFrame(pml4Phys & ~0xFFFUL);
+                PhysicalFrameRefcount.Set(pml4Aligned, 0);
+                PageFrameAllocator.FreeFrame(pml4Aligned);
             }
         }
 
@@ -711,6 +800,46 @@ namespace Kernel.Memory.Virtual
             }
         }
 
+        public static void DestroyProcess(ulong pml4Phys)
+        {
+            if (pml4Phys == 0) return;
+            if (s_processPool == null || s_vmaPool == null) return;
+
+            ulong rflags = s_vmmLock.Acquire();
+            try
+            {
+                for (int i = 0; i < MaxProcesses; i++)
+                {
+                    if (s_processPool[i].IsUsed && s_processPool[i].PageDirectoryPhysBase == pml4Phys)
+                    {
+                        ProcessControlBlock* pcb = &s_processPool[i];
+                        VirtualMemoryRegion* vma = pcb->VmaHead;
+                        while (vma != null)
+                        {
+                            VirtualMemoryRegion* next = vma->Next;
+                            vma->IsUsed = false;
+                            vma->Next = null;
+                            vma = next;
+                        }
+                        pcb->VmaHead = null;
+                        Kernel.Posix.PosixFdTable.ReleaseProcess(pcb);
+                        pcb->IsUsed = false;
+                        pcb->PageDirectoryPhysBase = 0;
+                        pcb->CSpaceRoot = null;
+                        pcb->Next = null;
+                        pcb->HeapStart = 0;
+                        pcb->HeapEnd = 0;
+                        pcb->NextMmapAddress = 0;
+                        break;
+                    }
+                }
+            }
+            finally
+            {
+                s_vmmLock.Release(rflags);
+            }
+        }
+
         public static VirtualMemoryRegion* AllocateVma()
         {
             if (s_vmaPool == null) InitializeVmm();
@@ -787,22 +916,45 @@ namespace Kernel.Memory.Virtual
             ProcessControlBlock* pcb = GetOrCreateProcess(pml4Phys);
             if (pcb == null) return ~0UL;
 
-            if (addr == 0)
-            {
-                addr = pcb->NextMmapAddress;
-                pcb->NextMmapAddress += alignedLength;
-            }
-            else
-            {
-                addr &= ~0xFFFUL;
-            }
-
-            if (addr >= Hhdm.Base || addr + alignedLength > Hhdm.Base) return ~0UL;
-
             if (prot == 0) prot = VmaProt.Read | VmaProt.Write;
 
-            AddVma(pcb, addr, addr + alignedLength, prot, VmaType.Anonymous);
-            return addr;
+            ulong rflags = s_vmmLock.Acquire();
+            try
+            {
+                bool autoAssign = (addr == 0);
+                if (autoAssign)
+                {
+                    addr = pcb->NextMmapAddress;
+                }
+                else
+                {
+                    addr &= ~0xFFFUL;
+                }
+
+                if (addr >= Hhdm.Base || alignedLength > Hhdm.Base - addr) return ~0UL;
+
+                VirtualMemoryRegion* vma = AllocateVma();
+                if (vma == null) return ~0UL;
+
+                vma->Start = addr;
+                vma->End = addr + alignedLength;
+                vma->Protection = prot;
+                vma->BackingType = VmaType.Anonymous;
+                vma->FileHandle = 0;
+                vma->FileOffset = 0;
+                vma->Next = pcb->VmaHead;
+                pcb->VmaHead = vma;
+
+                if (autoAssign)
+                {
+                    pcb->NextMmapAddress = addr + alignedLength;
+                }
+                return addr;
+            }
+            finally
+            {
+                s_vmmLock.Release(rflags);
+            }
         }
 
         public static ulong SysBrk(ulong pml4Phys, ulong newBrk)
@@ -810,32 +962,62 @@ namespace Kernel.Memory.Virtual
             ProcessControlBlock* pcb = GetOrCreateProcess(pml4Phys);
             if (pcb == null) return 0;
 
-            if (newBrk == 0 || newBrk == pcb->HeapEnd)
+            ulong rflags = s_vmmLock.Acquire();
+            try
             {
+                if (newBrk == 0 || newBrk == pcb->HeapEnd || newBrk < pcb->HeapStart)
+                {
+                    return pcb->HeapEnd;
+                }
+
+                if (newBrk > Hhdm.Base - 4096)
+                {
+                    return pcb->HeapEnd;
+                }
+
+                if (newBrk > pcb->HeapEnd)
+                {
+                    ulong alignedEnd = (newBrk + 4095) & ~0xFFFUL;
+                    if (alignedEnd > Hhdm.Base) return pcb->HeapEnd;
+
+                    VirtualMemoryRegion* heapVma = null;
+                    VirtualMemoryRegion* curr = pcb->VmaHead;
+                    while (curr != null)
+                    {
+                        if (pcb->HeapStart >= curr->Start && pcb->HeapStart < curr->End)
+                        {
+                            heapVma = curr;
+                            break;
+                        }
+                        curr = curr->Next;
+                    }
+
+                    if (heapVma != null)
+                    {
+                        heapVma->End = alignedEnd;
+                    }
+                    else
+                    {
+                        VirtualMemoryRegion* vma = AllocateVma();
+                        if (vma == null) return pcb->HeapEnd;
+                        vma->Start = pcb->HeapStart;
+                        vma->End = alignedEnd;
+                        vma->Protection = VmaProt.Read | VmaProt.Write;
+                        vma->BackingType = VmaType.Anonymous;
+                        vma->FileHandle = 0;
+                        vma->FileOffset = 0;
+                        vma->Next = pcb->VmaHead;
+                        pcb->VmaHead = vma;
+                    }
+                    pcb->HeapEnd = newBrk;
+                }
+
                 return pcb->HeapEnd;
             }
-
-            if (newBrk < pcb->HeapStart)
+            finally
             {
-                return pcb->HeapEnd;
+                s_vmmLock.Release(rflags);
             }
-
-            if (newBrk > pcb->HeapEnd)
-            {
-                ulong alignedEnd = (newBrk + 4095) & ~0xFFFUL;
-                VirtualMemoryRegion* heapVma = FindVma(pcb, pcb->HeapStart);
-                if (heapVma != null)
-                {
-                    heapVma->End = alignedEnd;
-                }
-                else
-                {
-                    AddVma(pcb, pcb->HeapStart, alignedEnd, VmaProt.Read | VmaProt.Write, VmaType.Anonymous);
-                }
-                pcb->HeapEnd = newBrk;
-            }
-
-            return pcb->HeapEnd;
         }
 
         public static bool ResolvePageFault(ulong faultAddress, ulong errorCode, InterruptContext* ctx)

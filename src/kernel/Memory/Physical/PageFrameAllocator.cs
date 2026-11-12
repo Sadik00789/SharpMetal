@@ -19,15 +19,26 @@ namespace Kernel.Memory.Physical
 
         public static bool IsRam(ulong phys)
         {
-            // Architectural correction #2: never treat GOP framebuffer or PCI
-            // MMIO mapped via MapUserMmio as managed RAM. PMM bitmap covers
-            // [0, _totalFrames*4096); usable RAM is [0x100000, s_maxUsablePhys)
-            // (MarkRangeFree tracks the high-water mark). Reject low memory
-            // (IVT/BDA/EBDA/trampoline) and anything at/above the managed top.
+            // Never treat <1MiB (IVT/BDA/EBDA/trampoline), DMA arena buffers,
+            // kernel/UEFI regions, GOP framebuffer, or PCI MMIO as PMM-managed RAM.
             if (phys < 0x100000UL) return false;
+            if (DmaArenaAllocator.Size != 0 && phys >= DmaArenaAllocator.MinAddress && phys < DmaArenaAllocator.MaxAddress) return false;
             if (s_maxUsablePhys != 0 && phys >= s_maxUsablePhys) return false;
             if (phys >= (_totalFrames * PageSize)) return false;
-            return true;
+
+            int count = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionCount;
+            if (count <= 0) return false;
+            if (count > Kernel.Boot.KernelHigh.BootMemoryMap.MaxRegions) count = Kernel.Boot.KernelHigh.BootMemoryMap.MaxRegions;
+            for (int i = 0; i < count; i++)
+            {
+                ulong start = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionStarts[i];
+                ulong pages = Kernel.Boot.KernelHigh.UsableMemoryMap.RegionPageCounts[i];
+                if (pages == 0 || pages > 0xFFFFFFFFFFFFFFFFUL / PageSize) continue;
+                ulong size = pages * PageSize;
+                if (size > 0xFFFFFFFFFFFFFFFFUL - start) continue;
+                if (phys >= start && phys < start + size) return true;
+            }
+            return false;
         }
 
         public static void Initialize(ulong* bitmapMemory, ulong totalFrames)
@@ -47,11 +58,20 @@ namespace Kernel.Memory.Physical
 
         public static void MarkRangeFree(ulong startPhys, ulong byteLength)
         {
+            if (byteLength == 0 || _bitmap == null) return;
             ulong rflags = s_pmmLock.Acquire();
             try
             {
-                ulong startFrame = startPhys / PageSize;
-                ulong frameCount = byteLength / PageSize;
+                ulong rawEnd = byteLength <= 0xFFFFFFFFFFFFFFFFUL - startPhys ? startPhys + byteLength : 0xFFFFFFFFFFFFFFFFUL;
+                // Preserve low memory < 1 MiB (IVT, BDA, EBDA, AP trampoline at 0x8000)
+                ulong clampedStart = startPhys < 0x100000UL ? 0x100000UL : startPhys;
+                clampedStart = (clampedStart + PageSize - 1) & ~(PageSize - 1);
+                ulong clampedEnd = rawEnd & ~(PageSize - 1);
+                if (clampedEnd <= clampedStart) return;
+
+                ulong startFrame = clampedStart / PageSize;
+                ulong frameCount = (clampedEnd - clampedStart) / PageSize;
+                ulong markedEndPhys = clampedStart;
 
                 for (ulong i = 0; i < frameCount; i++)
                 {
@@ -66,10 +86,10 @@ namespace Kernel.Memory.Physical
                         _bitmap[wordIdx] &= ~(1UL << bitIdx);
                         _freeFrames++;
                     }
+                    markedEndPhys = (frame + 1) * PageSize;
                 }
 
-                ulong endPhys = startPhys + frameCount * PageSize;
-                if (endPhys > s_maxUsablePhys) s_maxUsablePhys = endPhys;
+                if (markedEndPhys > s_maxUsablePhys) s_maxUsablePhys = markedEndPhys;
             }
             finally
             {
@@ -147,6 +167,7 @@ namespace Kernel.Memory.Physical
 
         public static void FreeFrame(ulong physAddr)
         {
+            if (physAddr < 0x100000UL) return;
             ulong rflags = s_pmmLock.Acquire();
             try
             {

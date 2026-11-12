@@ -139,6 +139,7 @@ namespace Kernel.Scheduling
             if (priority > 3) priority = 3;
 
             ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc((ulong)sizeof(ThreadControlBlock));
+            if (tcb == null) return null;
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
@@ -211,6 +212,7 @@ namespace Kernel.Scheduling
             if (priority > 3) priority = 3;
 
             ThreadControlBlock* tcb = (ThreadControlBlock*)SlabAllocator.KmAlloc((ulong)sizeof(ThreadControlBlock));
+            if (tcb == null) return null;
             tcb->Id = NextThreadId++;
             tcb->State = ThreadState.Ready;
             tcb->Priority = priority;
@@ -243,9 +245,34 @@ namespace Kernel.Scheduling
 
             // Allocate 16 KiB kernel stack
             ulong physStack = PageFrameAllocator.AllocateContiguousFrames(4);
+            if (physStack == 0)
+            {
+                SlabAllocator.KmFree(tcb, (ulong)sizeof(ThreadControlBlock));
+                return null;
+            }
             ulong virtStack = Hhdm.PhysicalToVirtual(physStack);
             tcb->KernelStackBase = virtStack;
             tcb->KernelStackTop = (virtStack + 16384) & ~15UL;
+
+            ulong kernPml4 = s_kernelPml4Phys != 0 ? s_kernelPml4Phys : VirtualMemorySpace.Pml4PhysicalAddress;
+            if (tcb->Pml4Address != 0 && tcb->Pml4Address != kernPml4)
+            {
+                if (pml4 == 0)
+                {
+                    if (PhysicalFrameRefcount.Get(tcb->Pml4Address) == 0)
+                    {
+                        PhysicalFrameRefcount.Set(tcb->Pml4Address, 2);
+                    }
+                    else
+                    {
+                        PhysicalFrameRefcount.Increment(tcb->Pml4Address);
+                    }
+                }
+                else if (PhysicalFrameRefcount.Get(tcb->Pml4Address) == 0)
+                {
+                    PhysicalFrameRefcount.Set(tcb->Pml4Address, 1);
+                }
+            }
 
             // User Thread Stack Synthesis (8 callee-saved registers + trampoline + 5 iretq qwords = 14 qwords = 112 bytes)
             ulong stackTop = tcb->KernelStackTop;
@@ -552,8 +579,9 @@ namespace Kernel.Scheduling
                 ThreadControlBlock* next = list->Next;
 
                 // Ensure ReapZombies() explicitly ignores the idle thread and main BSP thread (TID 0 and TID 1)
+                // Guard: never reap the boot MainThread, IdleThread, or RoottaskTcb
                 // so core execution stacks are never queued for deallocation.
-                if (list->Id == 0 || list->Id == 1 || list == MainThread || list == IdleThread)
+                if (list->Id == 0 || list->Id == 1 || list == MainThread || list == IdleThread || list == Kernel.Boot.KernelHigh.RoottaskTcb)
                 {
                     list = next;
                     continue;
@@ -562,17 +590,22 @@ namespace Kernel.Scheduling
                 // Only reap if thread has fully vacated CPU cores and is not currently executing
                 if (list->IsExecuting == 0 && list != CurrentThread)
                 {
-                    // Phase 1: reclaim user address space (user half only) before TCB free.
-                    // Skip shared kernel address space (PML4 == kernel PML4 / CR3 owner).
+                    // Phase 1: reclaim user address space (user half only) before TCB free
+                    // once the last thread sharing that PML4 has exited.
                     ulong pml4 = list->Pml4Address;
                     ulong kernPml4 = s_kernelPml4Phys != 0 ? s_kernelPml4Phys : VirtualMemorySpace.Pml4PhysicalAddress;
                     if (pml4 != 0 && kernPml4 != 0 && pml4 != kernPml4)
                     {
-                        if (Cpu.ReadCr3() == pml4)
+                        ushort refs = PhysicalFrameRefcount.Get(pml4);
+                        if (refs == 0 || PhysicalFrameRefcount.Decrement(pml4) == 0)
                         {
-                            Cpu.WriteCr3(kernPml4);
+                            if (Cpu.ReadCr3() == pml4)
+                            {
+                                Cpu.WriteCr3(kernPml4);
+                            }
+                            VirtualMemorySpace.DestroyProcess(pml4);
+                            VirtualMemorySpace.DestroyAddressSpace(pml4);
                         }
-                        VirtualMemorySpace.DestroyAddressSpace(pml4);
                         list->Pml4Address = 0;
                     }
                     if (list->KernelStackBase != 0)
@@ -619,11 +652,9 @@ namespace Kernel.Scheduling
             ThreadControlBlock* curr = CurrentThread;
             if (curr != null)
             {
-                // Mark state as Zombie rather than immediately freeing
+                // Mark state as Zombie rather than immediately freeing.
+                // ContextSwitch.asm clears IsExecuting=0 after RSP leaves curr's stack.
                 curr->State = ThreadState.Zombie;
-                
-                // Release execution guard so other cores don't spin-deadlock or fault
-                curr->IsExecuting = 0;
 
                 // Unblock any client waiting for a reply from this dying server thread
                 if (curr->ReplyTarget != null)
@@ -671,7 +702,9 @@ namespace Kernel.Scheduling
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) }, EntryPoint = "ReleaseSchedulerLock")]
         public static void ReleaseSchedulerLock()
         {
-            UnlockScheduler();
+            // Keep IF=0 while UserThreadTrampoline finishes popping registers and
+            // executes iretq; iretq atomically restores Ring 3 RFLAGS (0x3202).
+            s_schedLock.Release(0x02);
         }
 
         [UnmanagedCallersOnly(CallConvs = new[] { typeof(CallConvCdecl) })]

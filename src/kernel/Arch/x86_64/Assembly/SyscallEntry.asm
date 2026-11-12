@@ -57,22 +57,46 @@ SyscallEntry:
     push rdi
     push rsi
 
-    ; Total pushes = 3 (UserRsp, RCX, R11) + 4 (RDX,R10,R8,R9) + 8 (GPRs) = 15 pushes = 120 bytes.
-    ; (120 + 72) = 192 bytes (0 mod 16).
-    ; 72 bytes allocated on stack:
-    ; [rsp + 0]..[rsp + 31] = 32-byte shadow space for Microsoft x64 DispatchSyscall
-    ; [rsp + 32] = 5th argument: a4
-    ; [rsp + 40] = 6th argument: a5 (d2)
-    ; [rsp + 48] = 7th argument: a6 (d3)
-    ; [rsp + 56]..[rsp + 71] = 16 bytes alignment padding
-    sub rsp, 72
+    ; Preserve frame base and syscall number in callee-saved registers before XSAVE.
+    mov rbx, rsp            ; rbx = base of pushed GPR frame
+    mov r14, rax            ; r14 = syscall number
 
-    ; Map arguments to Microsoft x64 calling convention:
-    ; DispatchSyscall(rcx=num, rdx=a1, r8=a2, r9=a3, [rsp+32]=a4, [rsp+40]=a5, [rsp+48]=a6)
-    ; Input: rax=num, rdi=a1, rsi=a2, rdx=a3, r10=a4, r12=a5, r13=a6
-    ; (push preserves stack copies; source registers still hold user values)
-    mov rcx, rax            ; 1st arg: num
-    mov [rsp + 32], r10     ; 5th arg: a4
+    ; Save FPU/SSE/AVX state if CR4.OSXSAVE (bit 18) is enabled
+    mov rax, cr4
+    bt eax, 18
+    jnc .no_xsave_sys
+
+    sub rsp, 832
+    and rsp, -64
+    xor eax, eax
+    mov [rsp + 512], rax
+    mov [rsp + 520], rax
+    mov [rsp + 528], rax
+    mov [rsp + 536], rax
+    mov [rsp + 544], rax
+    mov [rsp + 552], rax
+    mov [rsp + 560], rax
+    mov [rsp + 568], rax
+
+    mov eax, 7              ; RFBM = x87 | SSE | AVX
+    xor edx, edx
+    xsave64 [rsp]
+    mov r15, rsp            ; r15 = XSAVE area base (preserved by callee-saved Win64)
+    sub rsp, 64             ; 32B shadow + 3 stack args + 8B align (0 mod 16)
+    jmp .setup_args
+
+.no_xsave_sys:
+    xor r15d, r15d
+    and rsp, -16
+    sub rsp, 64
+
+.setup_args:
+    ; Map arguments from saved frame [rbx + ...] to Microsoft x64 calling convention:
+    ; [rbx+0]=rsi, [rbx+8]=rdi, [rbx+16]=r15, [rbx+24]=r14, [rbx+32]=r13, [rbx+40]=r12,
+    ; [rbx+48]=rbp, [rbx+56]=rbx, [rbx+64]=r9, [rbx+72]=r8, [rbx+80]=r10, [rbx+88]=rdx
+    mov rcx, r14            ; 1st arg: num
+    mov rax, [rbx + 80]
+    mov [rsp + 32], rax     ; 5th arg: a4
 
     ; Frontier 5: Check calling thread AbiMode (offset 244 in TCB)
     ; If AbiMode == 1 (Linux ABI), 5th arg is user r8, 6th arg is user r9
@@ -81,16 +105,20 @@ SyscallEntry:
     jz .default_abi
     cmp dword [rax + 244], 1 ; AbiMode == 1 (Linux ABI)
     jne .default_abi
-    mov [rsp + 40], r8      ; 6th arg: Linux a5 (user r8)
-    mov [rsp + 48], r9      ; 7th arg: Linux a6 (user r9)
+    mov rax, [rbx + 72]
+    mov [rsp + 40], rax     ; 6th arg: Linux a5 (user r8)
+    mov rax, [rbx + 64]
+    mov [rsp + 48], rax     ; 7th arg: Linux a6 (user r9)
     jmp .dispatch
 .default_abi:
-    mov [rsp + 40], r12     ; 6th arg: SharpMetal a5 (d2)
-    mov [rsp + 48], r13     ; 7th arg: SharpMetal a6 (d3)
+    mov rax, [rbx + 40]
+    mov [rsp + 40], rax     ; 6th arg: SharpMetal a5 (d2)
+    mov rax, [rbx + 32]
+    mov [rsp + 48], rax     ; 7th arg: SharpMetal a6 (d3)
 .dispatch:
-    mov r9, rdx             ; 4th arg: a3
-    mov r8, rsi             ; 3rd arg: a2
-    mov rdx, rdi            ; 2nd arg: a1
+    mov rdx, [rbx + 8]      ; 2nd arg: a1 (user rdi)
+    mov r8,  [rbx + 0]      ; 3rd arg: a2 (user rsi)
+    mov r9,  [rbx + 88]     ; 4th arg: a3 (user rdx)
 
     ; 4. Dispatch to C# handler
     call DispatchSyscall
@@ -98,7 +126,27 @@ SyscallEntry:
     ; Disable interrupts before popping registers and restoring user RSP
     cli
 
-    add rsp, 72
+    test r15, r15
+    jz .skip_xrstor_sys
+    mov r14, rax            ; preserve syscall return value across xrstor64
+    mov eax, 7
+    xor edx, edx
+    xrstor64 [r15]
+    mov rax, r14
+.skip_xrstor_sys:
+    mov rsp, rbx
+
+    ; Canonical user-half RIP check before sysret (prevents Ring-0 #GP with user RSP active)
+    mov rcx, [rsp + 104]
+    shr rcx, 47
+    jz .rip_canonical
+    mov qword [rsp + 104], 0
+.rip_canonical:
+    ; Sanitize RFLAGS: clear NT (bit 14) and VM (bit 17), ensure IF=1 & bit 1 set
+    mov r11, [rsp + 96]
+    and r11, ~0x24000
+    or  r11, 0x202
+    mov [rsp + 96], r11
 
     ; 5. Restore callee-saved + user payload registers in exact reverse
     ; order (NOT RCX/R11 yet - those are sysretq-reserved).

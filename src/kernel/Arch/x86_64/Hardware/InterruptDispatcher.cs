@@ -95,11 +95,49 @@ namespace Kernel.Arch.x86_64.Hardware
 
         public static void RegisterVector(byte vector, Kernel.Ipc.Notification* notif, ulong badge = 0)
         {
-            if (vector >= 0x30 && vector <= 0xFE)
+            if (vector >= 0x30 && vector <= 0xFD)
             {
                 int idx = (int)vector - 0x30;
                 VectorNotifications[idx] = notif;
                 VectorNotifications.SetBadge(idx, badge != 0 ? badge : (1UL << (idx & 0x3F)));
+            }
+        }
+
+        private static void DrawFaultBanner(uint bannerColor, ulong vector)
+        {
+            ulong fbPhys = Kernel.Boot.KernelHigh.GopPhysBase;
+            ulong fbBytes = Kernel.Boot.KernelHigh.GopFbSize;
+            ulong w = Kernel.Boot.KernelHigh.GopWidth;
+            ulong h = Kernel.Boot.KernelHigh.GopHeight;
+            if (fbPhys == 0 || fbBytes < 4 || w == 0 || h == 0) return;
+
+            uint* fb = (uint*)Kernel.Memory.Virtual.Hhdm.PhysicalToVirtual(fbPhys);
+            ulong stride = Kernel.Boot.KernelHigh.GopPixelsPerScanLine != 0 ? Kernel.Boot.KernelHigh.GopPixelsPerScanLine : w;
+            ulong maxPixels = fbBytes / 4UL;
+            ulong bannerRows = h < 20 ? h : 20;
+            ulong bannerCols = w < stride ? w : stride;
+
+            for (ulong y = 0; y < bannerRows; y++)
+            {
+                ulong rowBase = y * stride;
+                if (rowBase >= maxPixels) break;
+                for (ulong x = 0; x < bannerCols && rowBase + x < maxPixels; x++)
+                {
+                    fb[rowBase + x] = bannerColor;
+                }
+            }
+
+            uint indColor = (vector == 14) ? 0xFFFFFF00 : (vector == 13) ? 0xFFFFFFFF : (vector == 6) ? 0xFF00FFFF : 0xFFFF00FF;
+            ulong indRows = h < 50 ? h : 50;
+            ulong indCols = bannerCols < 150 ? bannerCols : 150;
+            for (ulong y = 25; y < indRows; y++)
+            {
+                ulong rowBase = y * stride;
+                if (rowBase >= maxPixels) break;
+                for (ulong x = 0; x < indCols && rowBase + x < maxPixels; x++)
+                {
+                    fb[rowBase + x] = indColor;
+                }
             }
         }
 
@@ -169,18 +207,7 @@ namespace Kernel.Arch.x86_64.Hardware
             if ((ctx->Cs & 3) == 3)
             {
                 // Visual Ring 3 Exception Diagnostic on Framebuffer
-                if (Kernel.Boot.KernelHigh.GopPhysBase != 0)
-                {
-                    uint* fb = (uint*)Kernel.Memory.Virtual.Hhdm.PhysicalToVirtual(Kernel.Boot.KernelHigh.GopPhysBase);
-                    ulong w = Kernel.Boot.KernelHigh.GopWidth;
-                    // Orange Top Banner (scanlines 0..20)
-                    for (ulong i = 0; i < w * 20; i++) fb[i] = 0xFFFF5500;
-                    // Indicator block: Yellow if #PF (14), White if #GP (13), Cyan if #UD (6), Magenta otherwise
-                    uint indColor = (ctx->Vector == 14) ? 0xFFFFFF00 : (ctx->Vector == 13) ? 0xFFFFFFFF : (ctx->Vector == 6) ? 0xFF00FFFF : 0xFFFF00FF;
-                    for (ulong y = 25; y < 50; y++) {
-                        for (ulong x = 0; x < 150; x++) fb[y * w + x] = indColor;
-                    }
-                }
+                DrawFaultBanner(0xFFFF5500, ctx->Vector);
 
                 ulong ring3SerRflags = EarlySerial.AcquireLock();
                 EarlySerial.WriteInternal("[FAULT] Ring 3 Exception Vector: ");
@@ -205,8 +232,8 @@ namespace Kernel.Arch.x86_64.Hardware
                 var current = Kernel.Scheduling.Scheduler.CurrentThread;
                 if (current != null)
                 {
-                    // If roottask (TID 1) faults, system cannot recover: halt CPU so diagnosis is preserved on screen
-                    if (current->Id <= 1)
+                    // If roottask faults, system cannot recover: halt CPU so diagnosis is preserved on screen
+                    if ((Kernel.Boot.KernelHigh.RoottaskTcb != null && current == Kernel.Boot.KernelHigh.RoottaskTcb) || current->Id == 0)
                     {
                         while (true)
                         {
@@ -236,19 +263,8 @@ namespace Kernel.Arch.x86_64.Hardware
             }
 
             // Kernel-mode unhandled exception report (halt CPU)
-                        // Visual Kernel Panic on Framebuffer
-            if (Kernel.Boot.KernelHigh.GopPhysBase != 0)
-            {
-                uint* fb = (uint*)Kernel.Memory.Virtual.Hhdm.PhysicalToVirtual(Kernel.Boot.KernelHigh.GopPhysBase);
-                ulong w = Kernel.Boot.KernelHigh.GopWidth;
-                // Bright Red Top Banner (scanlines 0..20)
-                for (ulong i = 0; i < w * 20; i++) fb[i] = 0xFFFF0000;
-                // Yellow indicator block (width 100px) if vector == 14 (#PF), White if vector == 13 (#GP)
-                uint indColor = (ctx->Vector == 14) ? 0xFFFFFF00 : (ctx->Vector == 13) ? 0xFFFFFFFF : 0xFF00FFFF;
-                for (ulong y = 25; y < 50; y++) {
-                    for (ulong x = 0; x < 150; x++) fb[y * w + x] = indColor;
-                }
-            }
+            // Visual Kernel Panic on Framebuffer
+            DrawFaultBanner(0xFFFF0000, ctx->Vector);
 
             EarlySerial.ForceResetLock();
             ulong serRflags = EarlySerial.AcquireLock();
