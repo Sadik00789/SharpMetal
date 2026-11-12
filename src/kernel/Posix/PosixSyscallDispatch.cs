@@ -38,26 +38,33 @@ namespace Kernel.Posix
         public const long EMFILE  = 24;
         public const long ENOSYS  = 38;
 
-        // Static kernel bounce buffer for VFS and Net RPC transfers (zero heap allocation)
-        private static ulong s_vfsPhys;
-        private static void* s_vfsVirt;
-        private static ulong s_pathPhys;
-        private static void* s_pathVirt;
-        private static bool s_bounceInitialized;
-
-        private static void EnsureBounceBuffers()
+        private static bool IsUserRange(void* ptr, ulong len)
         {
-            if (s_bounceInitialized) return;
+            ulong addr = (ulong)ptr;
+            if (addr == 0 || addr >= Hhdm.Base) return false;
+            return len <= Hhdm.Base - addr;
+        }
 
-            s_vfsPhys = PageFrameAllocator.AllocateFrame();
-            s_vfsVirt = (void*)Hhdm.PhysicalToVirtual(s_vfsPhys);
-            for (int i = 0; i < 512; i++) ((ulong*)s_vfsVirt)[i] = 0;
+        private static ulong AllocBounceFrame(out byte* virt)
+        {
+            ulong phys = PageFrameAllocator.AllocateFrame();
+            if (phys == 0)
+            {
+                virt = null;
+                return 0;
+            }
+            virt = (byte*)Hhdm.PhysicalToVirtual(phys);
+            ulong* p = (ulong*)virt;
+            for (int i = 0; i < 512; i++) p[i] = 0;
+            return phys;
+        }
 
-            s_pathPhys = PageFrameAllocator.AllocateFrame();
-            s_pathVirt = (void*)Hhdm.PhysicalToVirtual(s_pathPhys);
-            for (int i = 0; i < 512; i++) ((ulong*)s_pathVirt)[i] = 0;
-
-            s_bounceInitialized = true;
+        private static void FreeBounceFrame(ulong phys)
+        {
+            if (phys != 0)
+            {
+                PageFrameAllocator.FreeFrame(phys);
+            }
         }
 
         public static ulong Dispatch(
@@ -113,7 +120,7 @@ namespace Kernel.Posix
 
         private static ulong SysRead(ProcessControlBlock* pcb, CNode* cspaceRoot, int fd, byte* buf, ulong count)
         {
-            if (buf == null || count == 0) return 0;
+            if (count == 0) return 0;
 
             PosixFdEntry entry;
             if (!PosixFdTable.GetFd(pcb, fd, out entry))
@@ -124,6 +131,7 @@ namespace Kernel.Posix
             // fd 0 / Stdin: Invariant 2 Blocking I/O Yield
             if (entry.Type == PosixFdType.Stdin)
             {
+                if (!IsUserRange(buf, 1)) return unchecked((ulong)-EFAULT);
                 if (cspaceRoot == null) return unchecked((ulong)-EIO);
 
                 Capability* cap;
@@ -174,33 +182,41 @@ namespace Kernel.Posix
                     return unchecked((ulong)-EIO);
                 }
 
-                EnsureBounceBuffers();
                 ulong chunk = count < 4096 ? count : 4096;
+                if (!IsUserRange(buf, chunk)) return unchecked((ulong)-EFAULT);
 
-                Cpu.EnableInterrupts();
-                ulong readBytes = FastPathTransfer.Send(
-                    (Endpoint*)cap->TargetObject,
-                    msgInfo: 2, // Read method 2
-                    d0: (ulong)entry.ServerHandle,
-                    d1: s_vfsPhys,
-                    d2: entry.CurrentOffset,
-                    d3: chunk,
-                    badge: cap->Badge,
-                    isCall: true);
-
-                if (readBytes == 0 || readBytes > 4096)
+                ulong vfsPhys = AllocBounceFrame(out byte* src);
+                if (vfsPhys == 0) return unchecked((ulong)-ENOMEM);
+                try
                 {
-                    return 0; // EOF or read failure
-                }
+                    Cpu.EnableInterrupts();
+                    ulong readBytes = FastPathTransfer.Send(
+                        (Endpoint*)cap->TargetObject,
+                        msgInfo: 2, // Read method 2
+                        d0: (ulong)entry.ServerHandle,
+                        d1: vfsPhys,
+                        d2: entry.CurrentOffset,
+                        d3: chunk,
+                        badge: cap->Badge,
+                        isCall: true);
 
-                byte* src = (byte*)s_vfsVirt;
-                for (ulong b = 0; b < readBytes; b++)
+                    if (readBytes == 0 || readBytes > chunk)
+                    {
+                        return 0; // EOF or read failure
+                    }
+
+                    for (ulong b = 0; b < readBytes; b++)
+                    {
+                        buf[b] = src[b];
+                    }
+
+                    PosixFdTable.UpdateOffset(pcb, fd, entry.CurrentOffset + readBytes);
+                    return readBytes;
+                }
+                finally
                 {
-                    buf[b] = src[b];
+                    FreeBounceFrame(vfsPhys);
                 }
-
-                PosixFdTable.UpdateOffset(pcb, fd, entry.CurrentOffset + readBytes);
-                return readBytes;
             }
 
             // fd >= 3: Socket Handle
@@ -215,32 +231,40 @@ namespace Kernel.Posix
                     return unchecked((ulong)-EIO);
                 }
 
-                EnsureBounceBuffers();
                 ulong chunk = count < 4096 ? count : 4096;
+                if (!IsUserRange(buf, chunk)) return unchecked((ulong)-EFAULT);
 
-                Cpu.EnableInterrupts();
-                ulong recvd = FastPathTransfer.Send(
-                    (Endpoint*)cap->TargetObject,
-                    msgInfo: 10, // Recv method 10
-                    d0: (ulong)entry.ServerHandle,
-                    d1: s_vfsPhys,
-                    d2: chunk,
-                    d3: 0,
-                    badge: cap->Badge,
-                    isCall: true);
-
-                if (recvd == 0 || recvd > 4096)
+                ulong netPhys = AllocBounceFrame(out byte* src);
+                if (netPhys == 0) return unchecked((ulong)-ENOMEM);
+                try
                 {
-                    return 0;
-                }
+                    Cpu.EnableInterrupts();
+                    ulong recvd = FastPathTransfer.Send(
+                        (Endpoint*)cap->TargetObject,
+                        msgInfo: 10, // Recv method 10
+                        d0: (ulong)entry.ServerHandle,
+                        d1: netPhys,
+                        d2: chunk,
+                        d3: 0,
+                        badge: cap->Badge,
+                        isCall: true);
 
-                byte* src = (byte*)s_vfsVirt;
-                for (ulong b = 0; b < recvd; b++)
+                    if (recvd == 0 || recvd > chunk)
+                    {
+                        return 0;
+                    }
+
+                    for (ulong b = 0; b < recvd; b++)
+                    {
+                        buf[b] = src[b];
+                    }
+
+                    return recvd;
+                }
+                finally
                 {
-                    buf[b] = src[b];
+                    FreeBounceFrame(netPhys);
                 }
-
-                return recvd;
             }
 
             return unchecked((ulong)-EBADF);
@@ -248,7 +272,7 @@ namespace Kernel.Posix
 
         private static ulong SysWrite(ProcessControlBlock* pcb, CNode* cspaceRoot, int fd, byte* buf, ulong count)
         {
-            if (buf == null || count == 0) return 0;
+            if (count == 0) return 0;
 
             PosixFdEntry entry;
             if (!PosixFdTable.GetFd(pcb, fd, out entry))
@@ -259,6 +283,7 @@ namespace Kernel.Posix
             // fd 1 & 2 / Stdout & Stderr: EarlySerial serial console writes
             if (entry.Type == PosixFdType.Stdout || entry.Type == PosixFdType.Stderr)
             {
+                if (!IsUserRange(buf, count)) return unchecked((ulong)-EFAULT);
                 for (ulong i = 0; i < count; i++)
                 {
                     EarlySerial.WriteChar((char)buf[i]);
@@ -278,26 +303,35 @@ namespace Kernel.Posix
                     return unchecked((ulong)-EIO);
                 }
 
-                EnsureBounceBuffers();
                 ulong chunk = count < 4096 ? count : 4096;
-                byte* dst = (byte*)s_vfsVirt;
-                for (ulong b = 0; b < chunk; b++)
+                if (!IsUserRange(buf, chunk)) return unchecked((ulong)-EFAULT);
+
+                ulong netPhys = AllocBounceFrame(out byte* dst);
+                if (netPhys == 0) return unchecked((ulong)-ENOMEM);
+                try
                 {
-                    dst[b] = buf[b];
+                    for (ulong b = 0; b < chunk; b++)
+                    {
+                        dst[b] = buf[b];
+                    }
+
+                    Cpu.EnableInterrupts();
+                    ulong sent = FastPathTransfer.Send(
+                        (Endpoint*)cap->TargetObject,
+                        msgInfo: 9, // Send method 9
+                        d0: (ulong)entry.ServerHandle,
+                        d1: netPhys,
+                        d2: chunk,
+                        d3: 0,
+                        badge: cap->Badge,
+                        isCall: true);
+
+                    return sent;
                 }
-
-                Cpu.EnableInterrupts();
-                ulong sent = FastPathTransfer.Send(
-                    (Endpoint*)cap->TargetObject,
-                    msgInfo: 9, // Send method 9
-                    d0: (ulong)entry.ServerHandle,
-                    d1: s_vfsPhys,
-                    d2: chunk,
-                    d3: 0,
-                    badge: cap->Badge,
-                    isCall: true);
-
-                return sent;
+                finally
+                {
+                    FreeBounceFrame(netPhys);
+                }
             }
 
             return unchecked((ulong)-EBADF);
@@ -305,7 +339,7 @@ namespace Kernel.Posix
 
         private static ulong SysOpen(ProcessControlBlock* pcb, CNode* cspaceRoot, byte* pathVirt, uint flags, uint mode)
         {
-            if (pathVirt == null) return unchecked((ulong)-EFAULT);
+            if (!IsUserRange(pathVirt, 1)) return unchecked((ulong)-EFAULT);
             if (cspaceRoot == null) return unchecked((ulong)-EIO);
 
             Capability* cap;
@@ -315,43 +349,54 @@ namespace Kernel.Posix
                 return unchecked((ulong)-EIO);
             }
 
-            EnsureBounceBuffers();
-            byte* pathDst = (byte*)s_pathVirt;
-            int len = 0;
-            while (len < 255 && pathVirt[len] != 0)
+            ulong maxScan = Hhdm.Base - (ulong)pathVirt;
+            int scanCap = maxScan < 255 ? (int)maxScan : 255;
+
+            ulong pathPhys = AllocBounceFrame(out byte* pathDst);
+            if (pathPhys == 0) return unchecked((ulong)-ENOMEM);
+            try
             {
-                pathDst[len] = pathVirt[len];
-                len++;
+                int len = 0;
+                while (len < scanCap && pathVirt[len] != 0)
+                {
+                    pathDst[len] = pathVirt[len];
+                    len++;
+                }
+                if (len == scanCap && scanCap < 255) return unchecked((ulong)-EFAULT);
+                pathDst[len] = 0;
+
+                if (len == 0) return unchecked((ulong)-ENOENT);
+
+                Cpu.EnableInterrupts();
+                ulong handle = FastPathTransfer.Send(
+                    (Endpoint*)cap->TargetObject,
+                    msgInfo: 1, // Open method 1
+                    d0: pathPhys,
+                    d1: (ulong)flags,
+                    d2: 0,
+                    d3: 0,
+                    badge: cap->Badge,
+                    isCall: true);
+
+                if (handle == 0 || handle >= 100)
+                {
+                    return unchecked((ulong)-ENOENT);
+                }
+
+                int fd = PosixFdTable.AllocateFd(pcb, PosixFdType.Vfs, (uint)handle, (ushort)flags);
+                if (fd < 0)
+                {
+                    // Table exhausted: close VFS handle
+                    FastPathTransfer.Send((Endpoint*)cap->TargetObject, msgInfo: 4, d0: handle, d1: 0, d2: 0, d3: 0, badge: cap->Badge, isCall: true);
+                    return unchecked((ulong)-EMFILE);
+                }
+
+                return (ulong)fd;
             }
-            pathDst[len] = 0;
-
-            if (len == 0) return unchecked((ulong)-ENOENT);
-
-            Cpu.EnableInterrupts();
-            ulong handle = FastPathTransfer.Send(
-                (Endpoint*)cap->TargetObject,
-                msgInfo: 1, // Open method 1
-                d0: s_pathPhys,
-                d1: (ulong)flags,
-                d2: 0,
-                d3: 0,
-                badge: cap->Badge,
-                isCall: true);
-
-            if (handle == 0 || handle >= 100)
+            finally
             {
-                return unchecked((ulong)-ENOENT);
+                FreeBounceFrame(pathPhys);
             }
-
-            int fd = PosixFdTable.AllocateFd(pcb, PosixFdType.Vfs, (uint)handle, (ushort)flags);
-            if (fd < 0)
-            {
-                // Table exhausted: close VFS handle
-                FastPathTransfer.Send((Endpoint*)cap->TargetObject, msgInfo: 4, d0: handle, d1: 0, d2: 0, d3: 0, badge: cap->Badge, isCall: true);
-                return unchecked((ulong)-EMFILE);
-            }
-
-            return (ulong)fd;
         }
 
         private static ulong SysClose(ProcessControlBlock* pcb, CNode* cspaceRoot, int fd)
@@ -474,8 +519,11 @@ namespace Kernel.Posix
 
         private static ulong SysExit(ThreadControlBlock* current, CNode* cspaceRoot, int code)
         {
-            // Revoke calling thread capability slots
-            if (cspaceRoot != null)
+            // Only revoke private per-process CNode roots; never wipe the shared
+            // kernel or roottask CSpaceRoot inherited by servers and child tasks.
+            bool isKernelCNode = Scheduler.MainThread != null && cspaceRoot == Scheduler.MainThread->CSpaceRoot;
+            bool isRootCNode = Kernel.Boot.KernelHigh.RoottaskTcb != null && cspaceRoot == Kernel.Boot.KernelHigh.RoottaskTcb->CSpaceRoot;
+            if (cspaceRoot != null && !isKernelCNode && !isRootCNode)
             {
                 for (uint s = 0; s < CNode.SlotCount; s++)
                 {

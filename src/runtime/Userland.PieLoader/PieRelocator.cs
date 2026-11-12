@@ -109,11 +109,11 @@ namespace Userland.PieLoader
             {
                 return true;
             }
+            // Overflow-safe pre-check before adding relocDirectoryRva + loadAddress.
+            if (relocDirectoryRva > 0xFFFFFFFFFFFFFFFFUL - loadAddress) return false;
             // Reloc directory itself must live inside the image.
             if (!PieBounds.IsInImageRange(loadAddress, imageSize, loadAddress + relocDirectoryRva, relocDirectorySize))
             {
-                // Overflow-safe pre-check (wrapping RVA + loadAddress).
-                if (relocDirectoryRva > 0xFFFFFFFFFFFFFFFFUL - loadAddress) return false;
                 return false;
             }
 
@@ -340,13 +340,17 @@ namespace Userland.PieLoader
             fixed (byte* img = image)
             {
                 if (img[0] != 0x4D || img[1] != 0x5A) return 0;
-                uint e_lfanew = *(uint*)(img + 0x3C);
-                if (e_lfanew + 6 + 40 > (uint)image.Length) return 0;
+                ulong imgLen = (ulong)image.Length;
+                ulong e_lfanew = *(uint*)(img + 0x3C);
+                if (e_lfanew > imgLen || imgLen - e_lfanew < 24) return 0;
                 if (*(uint*)(img + e_lfanew) != 0x00004550) return 0;
 
                 ushort numSections = *(ushort*)(img + e_lfanew + 6);
                 ushort optSize = *(ushort*)(img + e_lfanew + 20);
                 if (numSections == 0 || numSections > 96) return 0;
+                if ((ulong)optSize > imgLen - e_lfanew - 24) return 0;
+                if (optSize < 2) return 0;
+
                 byte* optHdr = img + e_lfanew + 24;
                 ushort magic = *(ushort*)optHdr;
                 ulong imageBase;
@@ -355,6 +359,7 @@ namespace Userland.PieLoader
                 uint relocSize;
                 if (magic == 0x20B) // PE32+
                 {
+                    if (optSize < 144) return 0;
                     imageBase = *(ulong*)(optHdr + 24);
                     entryRva = *(uint*)(optHdr + 16);
                     relocRva = *(uint*)(optHdr + 136);
@@ -362,6 +367,7 @@ namespace Userland.PieLoader
                 }
                 else if (magic == 0x10B) // PE32
                 {
+                    if (optSize < 112) return 0;
                     imageBase = *(uint*)(optHdr + 28);
                     entryRva = *(uint*)(optHdr + 16);
                     relocRva = *(uint*)(optHdr + 104);
@@ -372,7 +378,9 @@ namespace Userland.PieLoader
                     return 0;
                 }
 
-                byte* secHeaders = img + e_lfanew + 24 + optSize;
+                ulong secTableOff = e_lfanew + 24 + optSize;
+                if ((ulong)numSections * 40UL > imgLen - secTableOff) return 0;
+                byte* secHeaders = img + secTableOff;
                 // Compute image extent (max vAddr + alloc) for [Base, Base+Size) proof.
                 ulong imageExtent = 0;
                 for (int s = 0; s < numSections; s++)

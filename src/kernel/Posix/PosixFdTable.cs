@@ -238,5 +238,39 @@ namespace Kernel.Posix
                 s_lock.Release(rflags);
             }
         }
+
+        public static void ReleaseProcess(ProcessControlBlock* pcb)
+        {
+            if (pcb == null || !s_initialized) return;
+
+            ulong rflags = s_lock.Acquire();
+            try
+            {
+                for (int i = 0; i < MaxProcesses; i++)
+                {
+                    if (s_tables[i].IsUsed && s_tables[i].Pcb == pcb)
+                    {
+                        for (int fd = 0; fd < MaxFds; fd++)
+                        {
+                            PosixFdEntry* e = GetEntryPtr(&s_tables[i], fd);
+                            if (e != null)
+                            {
+                                e->InUse = false;
+                                e->Type = PosixFdType.None;
+                                e->ServerHandle = 0;
+                                e->Flags = 0;
+                                e->CurrentOffset = 0;
+                            }
+                        }
+                        s_tables[i].Pcb = null;
+                        s_tables[i].IsUsed = false;
+                    }
+                }
+            }
+            finally
+            {
+                s_lock.Release(rflags);
+            }
+        }
     }
 }

@@ -125,7 +125,12 @@ namespace PosixRunner
                 ident[4] != ElfConstants.ELFCLASS64 ||
                 ident[5] != ElfConstants.ELFDATA2LSB ||
                 ehdr->e_type != ElfConstants.ET_DYN ||
-                ehdr->e_machine != ElfConstants.EM_X86_64)
+                ehdr->e_machine != ElfConstants.EM_X86_64 ||
+                ehdr->e_phentsize != (ushort)sizeof(Elf64_Phdr) ||
+                ehdr->e_phnum == 0 ||
+                ehdr->e_phnum > 128 ||
+                ehdr->e_phoff > bytesRead ||
+                (ulong)ehdr->e_phnum * (ulong)ehdr->e_phentsize > bytesRead - ehdr->e_phoff)
             {
                 Log("[POSIX_RUNNER] ERROR: Invalid ELF64/PIE header!\n");
                 SyscallWrappers.Exit(1);
@@ -133,24 +138,45 @@ namespace PosixRunner
             }
 
             const ulong AslrBase = 0x0000000040000000UL;
+            const ulong MaxPieSpan = 0x10000000UL; // 256 MiB confinement below 0x50000000
             Elf64_Phdr* phdrs = (Elf64_Phdr*)((byte*)ehdr + ehdr->e_phoff);
             Elf64_Phdr* dynPhdr = null;
+            ulong maxLoadedEnd = 0;
 
             // 5. Load and map each PT_LOAD segment
             for (ushort i = 0; i < ehdr->e_phnum; i++)
             {
                 if (phdrs[i].p_type == ElfConstants.PT_LOAD)
                 {
-                    ulong segVirt = AslrBase + phdrs[i].p_vaddr;
+                    ulong vaddr = phdrs[i].p_vaddr;
                     ulong segMemSz = phdrs[i].p_memsz;
                     ulong segFileSz = phdrs[i].p_filesz;
                     ulong segFileOff = phdrs[i].p_offset;
 
+                    if (segFileSz > segMemSz ||
+                        segFileOff > bytesRead ||
+                        segFileSz > bytesRead - segFileOff ||
+                        vaddr >= MaxPieSpan ||
+                        segMemSz > MaxPieSpan - vaddr)
+                    {
+                        Log("[POSIX_RUNNER] ERROR: ELF PT_LOAD segment out of bounds!\n");
+                        SyscallWrappers.Exit(1);
+                        return;
+                    }
+
+                    if (segMemSz == 0) continue;
+
+                    ulong segVirt = AslrBase + vaddr;
                     ulong alignedStart = segVirt & ~0xFFFUL;
-                    ulong alignedEnd = (segVirt + segMemSz + 4095) & ~0xFFFUL;
+                    ulong alignedEnd = (segVirt + segMemSz + 4095UL) & ~0xFFFUL;
                     ulong segAllocBytes = alignedEnd - alignedStart;
 
-                    SyscallWrappers.AllocDma(segAllocBytes, alignedStart);
+                    if (SyscallWrappers.AllocDma(segAllocBytes, alignedStart) == 0)
+                    {
+                        Log("[POSIX_RUNNER] ERROR: Failed to map PT_LOAD segment!\n");
+                        SyscallWrappers.Exit(1);
+                        return;
+                    }
 
                     byte* src = (byte*)ElfStagingVirt + segFileOff;
                     byte* dst = (byte*)segVirt;
@@ -163,6 +189,9 @@ namespace PosixRunner
                     {
                         dst[b] = 0;
                     }
+
+                    ulong segEndRel = vaddr + segMemSz;
+                    if (segEndRel > maxLoadedEnd) maxLoadedEnd = segEndRel;
                 }
                 else if (phdrs[i].p_type == ElfConstants.PT_DYNAMIC)
                 {
@@ -170,9 +199,23 @@ namespace PosixRunner
                 }
             }
 
+            if (maxLoadedEnd == 0 || ehdr->e_entry >= maxLoadedEnd)
+            {
+                Log("[POSIX_RUNNER] ERROR: Invalid PIE entry point or empty segments!\n");
+                SyscallWrappers.Exit(1);
+                return;
+            }
+
             // 6. Apply R_X86_64_RELATIVE Relocations
             if (dynPhdr != null)
             {
+                if (dynPhdr->p_vaddr >= maxLoadedEnd || dynPhdr->p_memsz > maxLoadedEnd - dynPhdr->p_vaddr)
+                {
+                    Log("[POSIX_RUNNER] ERROR: PT_DYNAMIC out of loaded range!\n");
+                    SyscallWrappers.Exit(1);
+                    return;
+                }
+
                 Elf64_Dyn* dyn = (Elf64_Dyn*)(AslrBase + dynPhdr->p_vaddr);
                 ulong relaVaddr = 0;
                 ulong relaSz = 0;
@@ -188,14 +231,31 @@ namespace PosixRunner
 
                 if (relaVaddr != 0 && relaSz > 0)
                 {
-                    ulong count = relaSz / (relaEnt != 0 ? relaEnt : 24);
-                    Elf64_Rela* rela = (Elf64_Rela*)(AslrBase + relaVaddr);
+                    if (relaEnt < (ulong)sizeof(Elf64_Rela) ||
+                        relaVaddr >= maxLoadedEnd ||
+                        relaSz > maxLoadedEnd - relaVaddr ||
+                        maxLoadedEnd < 8)
+                    {
+                        Log("[POSIX_RUNNER] ERROR: Invalid DT_RELA relocation table!\n");
+                        SyscallWrappers.Exit(1);
+                        return;
+                    }
+
+                    ulong count = relaSz / relaEnt;
+                    byte* relaBase = (byte*)(AslrBase + relaVaddr);
                     for (ulong r = 0; r < count; r++)
                     {
-                        if (rela[r].R_Type == ElfConstants.R_X86_64_RELATIVE)
+                        Elf64_Rela* relaEntry = (Elf64_Rela*)(relaBase + (r * relaEnt));
+                        if (relaEntry->R_Type == ElfConstants.R_X86_64_RELATIVE)
                         {
-                            ulong* target = (ulong*)(AslrBase + rela[r].r_offset);
-                            *target = AslrBase + (ulong)rela[r].r_addend;
+                            if (relaEntry->r_offset > maxLoadedEnd - 8)
+                            {
+                                Log("[POSIX_RUNNER] ERROR: Out-of-bounds relocation target!\n");
+                                SyscallWrappers.Exit(1);
+                                return;
+                            }
+                            ulong* target = (ulong*)(AslrBase + relaEntry->r_offset);
+                            *target = AslrBase + (ulong)relaEntry->r_addend;
                         }
                     }
                 }
@@ -205,7 +265,12 @@ namespace PosixRunner
             const ulong UserStackBase = 0x00007FFFFFF00000UL;
             const ulong UserStackSize = 65536;
             const ulong DefaultStackTop = UserStackBase + UserStackSize;
-            SyscallWrappers.AllocDma(UserStackSize, UserStackBase);
+            if (SyscallWrappers.AllocDma(UserStackSize, UserStackBase) == 0)
+            {
+                Log("[POSIX_RUNNER] ERROR: Failed to map POSIX user stack!\n");
+                SyscallWrappers.Exit(1);
+                return;
+            }
 
             // 8. Build System V AMD64 initial stack layout (argc, argv, envp, auxv)
             ulong userRsp = PosixStackBuilder.BuildInitialStack(
@@ -219,14 +284,11 @@ namespace PosixRunner
 
             ulong entryRip = AslrBase + ehdr->e_entry;
 
-            // Transition calling thread to Linux ABI mode before jumping into PIE
-            Microkernel.Posix.PosixAbi.SwitchToLinuxAbi();
-
             Log("[POSIX_RUNNER] Jumping to PIE entry point at 0x");
             PrintHex(entryRip);
             Log("...\n");
 
-            // 9. Jump to PIE: switches RSP, executes SysSetAbi(1), clears GPRs, jumps to entryRip
+            // 9. Jump to PIE: switches RSP, executes SysSetAbi(1) in SharpMetal ABI, clears GPRs, jumps to entryRip
             JumpToPie(entryRip, userRsp);
         }
 
