@@ -310,7 +310,7 @@ namespace FsFat32
                         if (firstByte == 0xE5) continue;
 
                         byte attr = entry[11];
-                        if (attr == 0x0F) continue; // LFN
+                        if (attr == 0x0F || (attr & 0x08) != 0) continue; // Skip LFN & Volume Label
 
                         bool match = true;
                         for (int i = 0; i < 11; i++)
@@ -482,23 +482,33 @@ namespace FsFat32
 
         public static ulong Read(uint fileHandle, ulong outBufferPhys, ulong offset, ulong length)
         {
-            if (fileHandle >= MaxOpenFiles || !s_openFiles[fileHandle].InUse || outBufferPhys == 0) return 0;
+            if (fileHandle >= MaxOpenFiles || !s_openFiles[fileHandle].InUse || outBufferPhys == 0 || length == 0) return 0;
+
+            ulong fileSize = s_openFiles[fileHandle].FileSize;
+            if (offset >= fileSize) return 0;
+
+            ulong toRead = fileSize - offset;
+            if (length < toRead) toRead = length;
+            if (toRead > 0x10000000UL) toRead = 0x10000000UL;
 
             var storageClient = new BlockStorageServiceClient(endpointCptr: 9);
 
+            ulong pagePhys = outBufferPhys & ~0xFFFUL;
+            ulong pageOff = outBufferPhys & 0xFFFUL;
+            ulong mapSize = (pageOff + toRead + 4095UL) & ~4095UL;
             ulong clientVirt = 0x26000000UL;
-            SyscallWrappers.MapMmio(outBufferPhys, clientVirt, (length + 4095) & ~4095UL, writeCombining: false);
-            byte* dst = (byte*)clientVirt;
+            SyscallWrappers.MapMmio(pagePhys, clientVirt, mapSize, writeCombining: false);
+            byte* dst = (byte*)(clientVirt + pageOff);
 
             uint curClus = s_openFiles[fileHandle].StartCluster;
             ulong bytesRead = 0;
             ulong currentFileOffset = 0;
 
-            while (curClus >= 2 && curClus < 0x0FFFFFF8 && bytesRead < length)
+            while (curClus >= 2 && curClus < 0x0FFFFFF8 && bytesRead < toRead)
             {
                 ulong clusLba = ClusterToLba(curClus);
 
-                for (uint s = 0; s < SectorsPerCluster && bytesRead < length; s++)
+                for (uint s = 0; s < SectorsPerCluster && bytesRead < toRead; s++)
                 {
                     if (currentFileOffset + (ulong)BytesPerSector > offset)
                     {
@@ -507,9 +517,9 @@ namespace FsFat32
                         ulong sectorStart = currentFileOffset;
                         ulong copyStart = (offset > sectorStart) ? (offset - sectorStart) : 0;
                         ulong copyLen = (ulong)BytesPerSector - copyStart;
-                        if (copyLen > (length - bytesRead))
+                        if (copyLen > (toRead - bytesRead))
                         {
-                            copyLen = length - bytesRead;
+                            copyLen = toRead - bytesRead;
                         }
 
                         for (ulong b = 0; b < copyLen; b++)
@@ -534,9 +544,12 @@ namespace FsFat32
             var storageClient = new BlockStorageServiceClient(endpointCptr: 9);
 
             // Fixed virtual address window 0x25000000UL
+            ulong pagePhys = outBufferPhys & ~0xFFFUL;
+            ulong pageOff = outBufferPhys & 0xFFFUL;
+            ulong mapSize = (pageOff + 4096UL + 4095UL) & ~4095UL;
             ulong clientVirt = 0x25000000UL;
-            SyscallWrappers.MapMmio(outBufferPhys, clientVirt, 4096, writeCombining: false);
-            byte* dst = (byte*)clientVirt;
+            SyscallWrappers.MapMmio(pagePhys, clientVirt, mapSize, writeCombining: false);
+            byte* dst = (byte*)(clientVirt + pageOff);
 
             for (int i = 0; i < 4096; i++) dst[i] = 0;
 

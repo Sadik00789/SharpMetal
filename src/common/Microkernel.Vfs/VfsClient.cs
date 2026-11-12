@@ -12,10 +12,12 @@ namespace Microkernel.Vfs
             uint endpoint = VfsMountManager.ResolveEndpoint(path);
             var fsClient = new FilesystemServiceClient(endpoint);
 
-            // Write path into shared DMA buffer (0x3A000000UL)
-            ulong pathVirt = 0x3A000000UL;
+            // Write path into dedicated VFS DMA buffer (0x36000000UL)
+            ulong pathVirt = 0x36000000UL;
             ulong pathPhys = SyscallWrappers.AllocDma(4096, pathVirt);
+            if (pathPhys == 0) return 0;
             byte* pathBuf = (byte*)pathVirt;
+            pathBuf[0] = 0;
             for (int i = 0; i < path.Length && i < 255; i++)
             {
                 pathBuf[i] = (byte)path[i];

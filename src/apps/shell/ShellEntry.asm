@@ -98,9 +98,33 @@ RhpStelemRef:
     ret
 
 RhpNewFast:
-    lea rax, [rel .static_obj_buf]
+    ; Allocate 256-byte zeroed object slot in RW .bss (never write into .text)
+    push rcx
+    push rdi
+    lea rcx, [rel obj_bump_ptr]
+    mov rax, [rcx]
+    test rax, rax
+    jnz .obj_check
+    lea rax, [rel obj_heap_buf]
+.obj_check:
+    lea rdx, [rax + 256]
+    lea rdi, [rel obj_heap_buf + 65536]
+    cmp rdx, rdi
+    jbe .obj_zero
+    lea rax, [rel obj_heap_buf]
+    lea rdx, [rax + 256]
+.obj_zero:
+    mov [rcx], rdx
+    mov rdi, rax
+    xor rcx, rcx
+.obj_zero_loop:
+    mov qword [rdi + rcx*8], 0
+    inc rcx
+    cmp rcx, 32
+    jb .obj_zero_loop
+    pop rdi
+    pop rcx
     ret
-.static_obj_buf: times 256 db 0
 
 RhpNewArrayFast:
 RhpNewArray:
@@ -113,6 +137,12 @@ RhpNewArray:
     mov rbx, rcx        ; MethodTable
     mov r12, rdx        ; length
 
+    ; Reject negative or oversized element counts that exceed array_heap_buf
+    test rdx, rdx
+    js .arr_oom
+    cmp rdx, 65500
+    ja .arr_oom
+
     ; calculate size: 16 (header) + length * 8 + 15, aligned to 16
     mov rax, rdx
     shl rax, 3
@@ -120,7 +150,7 @@ RhpNewArray:
     and rax, -16
     mov r13, rax        ; allocation size
 
-    ; Bump pointer allocation
+    ; Bump pointer allocation with bounds check
     lea rcx, [rel array_bump_ptr]
     mov rax, [rcx]
     test rax, rax
@@ -128,6 +158,9 @@ RhpNewArray:
     lea rax, [rel array_heap_buf]
 .allocated:
     lea rdx, [rax + r13]
+    lea rdi, [rel array_heap_buf + 524288]
+    cmp rdx, rdi
+    ja .arr_oom
     mov [rcx], rdx
 
     ; Zero out the allocated memory
@@ -154,13 +187,23 @@ RhpNewArray:
     pop rbx
     ret
 
+.arr_oom:
+    xor eax, eax
+    pop rdi
+    pop r13
+    pop r12
+    pop rbx
+    ret
+
 RhpInitialDynamicInterfaceDispatch:
     ret
 
 section .bss
 align 16
+obj_bump_ptr: resq 1
+obj_heap_buf: resb 65536
 array_bump_ptr: resq 1
-array_heap_buf: resb 262144
+array_heap_buf: resb 524288
 
 section .data
 
