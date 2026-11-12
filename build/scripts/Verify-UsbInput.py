@@ -13,15 +13,28 @@ import sys
 import time
 
 MONITOR_SOCK = "/tmp/sm-qemu-monitor.sock"
+IS_WINDOWS = os.name == "nt"
 XHCI_PASS = "[PASS] XHCI: Controller initialized and USB keyboard addressed"
 KEYBOARD_ONLINE = "[XHCI] USB keyboard online."
 
 
-def connect_monitor():
+def pick_tcp_port():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def connect_monitor(tcp_port=None):
     for _ in range(40):
         try:
-            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-            s.connect(MONITOR_SOCK)
+            if tcp_port is not None:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.connect(("127.0.0.1", tcp_port))
+            else:
+                s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                s.connect(MONITOR_SOCK)
             s.settimeout(5)
             return s
         except OSError:
@@ -48,7 +61,8 @@ def main():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     repo_root = os.path.abspath(os.path.join(script_dir, "../.."))
 
-    if os.path.exists(MONITOR_SOCK):
+    tcp_port = pick_tcp_port() if IS_WINDOWS else None
+    if tcp_port is None and os.path.exists(MONITOR_SOCK):
         os.unlink(MONITOR_SOCK)
 
     if not wait_for_udp_port_free():
@@ -59,9 +73,14 @@ def main():
     print("   SharpMetal xHCI USB HID End-to-End Input Verification         ")
     print("=================================================================")
 
+    monitor_arg = (
+        "tcp:127.0.0.1:{},server,nowait".format(tcp_port)
+        if tcp_port is not None
+        else "unix:{},server,nowait".format(MONITOR_SOCK)
+    )
     proc = subprocess.Popen(
         ["bash", "build/scripts/Run-Qemu.sh", "--headless",
-         "-monitor", "unix:{},server,nowait".format(MONITOR_SOCK)],
+         "-monitor", monitor_arg],
         cwd=repo_root,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -87,7 +106,7 @@ def main():
             saw_xhci = True
             # Send immediately: the kernel powers the machine off once its
             # scripted demo finishes, so the interactive window is short.
-            monitor = connect_monitor()
+            monitor = connect_monitor(tcp_port)
             if monitor is None:
                 print("[-] Could not connect to the QEMU monitor socket")
             else:

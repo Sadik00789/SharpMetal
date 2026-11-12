@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+BUILD_START_SECS=$SECONDS
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 TFM="net10.0"
@@ -29,136 +31,145 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "[BUILD] Compiling MiniCoreLib..."
-dotnet build "${REPO_ROOT}/src/common/MiniCoreLib/MiniCoreLib.csproj" -c Release
+OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
+ARCH="$(uname -m)"
+IS_WINDOWS_BASH=0
+if [[ "$OS" == mingw* || "$OS" == msys* || "$OS" == cygwin* ]] && command -v cygpath >/dev/null 2>&1; then
+    IS_WINDOWS_BASH=1
+fi
 
-echo "[BUILD] Compiling Microkernel.Abstractions..."
-dotnet build "${REPO_ROOT}/src/common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" -c Release
+host_path() {
+    if [ "$IS_WINDOWS_BASH" -eq 1 ]; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
 
-echo "[BUILD] Compiling Microkernel.RpcGenerator..."
-dotnet build "${REPO_ROOT}/src/compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj" -c Release
+REPO_HOST="$(host_path "$REPO_ROOT")"
+REPO_MSBUILD="$REPO_HOST"
 
-echo "[BUILD] Compiling Userland.Runtime.ZeroAlloc..."
-dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" -c Release
+echo "=== [0/6] Restoring and Building Managed IL Graph in Parallel ==="
+T_IL_START=$SECONDS
+BUILD_PROJ="${TMP_DIR}/SharpMetalBuild.proj"
+cat > "$BUILD_PROJ" <<EOF
+<Project>
+  <PropertyGroup>
+    <RepoRoot>${REPO_MSBUILD}</RepoRoot>
+  </PropertyGroup>
+  <ItemGroup>
+    <SharpMetalProj Include="\$(RepoRoot)/src/common/MiniCoreLib/MiniCoreLib.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/common/Microkernel.Abstractions/Microkernel.Abstractions.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/compiler-plugins/Microkernel.RpcGenerator/Microkernel.RpcGenerator.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/runtime/Userland.Runtime.ZeroAlloc/Userland.Runtime.ZeroAlloc.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/common/Microkernel.Vfs/Microkernel.Vfs.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/libs/Microkernel.Drawing/Microkernel.Drawing.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/net.stack/net.stack.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/libs/Microkernel.Posix/Microkernel.Posix.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/roottask/roottask.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/pci_server/pci_server.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/display_server/display_server.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/supervisor/supervisor.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/drivers/storage.nvme/storage.nvme.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/drivers/input.hid/input.hid.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/drivers/bus.xhci/bus.xhci.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/drivers/net.virtio/net.virtio.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/servers/fs.fat32/fs.fat32.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/apps/shell/shell.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/apps/posix_runner/posix_runner.csproj" />
+    <SharpMetalProj Include="\$(RepoRoot)/src/kernel/Kernel.csproj" />
+  </ItemGroup>
+  <Target Name="Restore">
+    <MSBuild Projects="@(SharpMetalProj)" Targets="Restore" BuildInParallel="true" />
+  </Target>
+  <Target Name="Build">
+    <MSBuild Projects="@(SharpMetalProj)" Targets="Build" BuildInParallel="true" Properties="Configuration=Release" />
+  </Target>
+</Project>
+EOF
 
-echo "[BUILD] Compiling Userland.Runtime.Gc..."
-dotnet build "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/Userland.Runtime.Gc.csproj" -c Release
+BUILD_PROJ_HOST="$(host_path "$BUILD_PROJ")"
+echo "[BUILD] Restoring solution packages..."
+dotnet restore "$BUILD_PROJ_HOST" --nologo -m
+echo "[BUILD] Compiling all 22 projects in parallel..."
+dotnet msbuild "$BUILD_PROJ_HOST" -t:Build -m --nologo
 
-echo "[BUILD] Compiling Microkernel.Vfs IL..."
-dotnet build "${REPO_ROOT}/src/common/Microkernel.Vfs/Microkernel.Vfs.csproj" -c Release
-mkdir -p "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}"
-mkdir -p "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}"
-cp -f "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}/Microkernel.Vfs.dll" \
-      "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" 2>/dev/null || true
-cp -f "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
-      "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/x64/Release/${TFM}/Microkernel.Vfs.dll" 2>/dev/null || true
-
-echo "[BUILD] Compiling Userland.PieLoader IL..."
-dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release
-mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}"
-mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}"
-cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
-      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
-cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
-      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
-
-echo "[BUILD] Compiling roottask IL..."
-dotnet build "${REPO_ROOT}/src/servers/roottask/roottask.csproj" -c Release
-
-echo "[BUILD] Compiling pci_server IL..."
-dotnet build "${REPO_ROOT}/src/servers/pci_server/pci_server.csproj" -c Release
-
-echo "[BUILD] Compiling display_server IL..."
-dotnet build "${REPO_ROOT}/src/servers/display_server/display_server.csproj" -c Release
-
-echo "[BUILD] Compiling supervisor IL..."
-dotnet build "${REPO_ROOT}/src/servers/supervisor/supervisor.csproj" -c Release
-
-echo "[BUILD] Compiling Microkernel.Drawing IL..."
-dotnet build "${REPO_ROOT}/src/libs/Microkernel.Drawing/Microkernel.Drawing.csproj" -c Release
-
-echo "[BUILD] Compiling storage.nvme IL..."
-dotnet build "${REPO_ROOT}/src/servers/drivers/storage.nvme/storage.nvme.csproj" -c Release
-
-echo "[BUILD] Compiling input.hid IL..."
-dotnet build "${REPO_ROOT}/src/servers/drivers/input.hid/input.hid.csproj" -c Release
-
-echo "[BUILD] Compiling bus.xhci IL..."
-dotnet build "${REPO_ROOT}/src/servers/drivers/bus.xhci/bus.xhci.csproj" -c Release
-
-echo "[BUILD] Compiling net.stack IL..."
-dotnet build "${REPO_ROOT}/src/servers/net.stack/net.stack.csproj" -c Release
-mkdir -p "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}"
-mkdir -p "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}"
-cp -f "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" \
-      "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}/net.stack.dll" 2>/dev/null || true
-cp -f "${REPO_ROOT}/src/servers/net.stack/bin/Release/${TFM}/net.stack.dll" \
-      "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" 2>/dev/null || true
-
-echo "[BUILD] Compiling net.virtio IL..."
-dotnet build "${REPO_ROOT}/src/servers/drivers/net.virtio/net.virtio.csproj" -c Release
-
-echo "[BUILD] Compiling fs.fat32 IL..."
-dotnet build "${REPO_ROOT}/src/servers/fs.fat32/fs.fat32.csproj" -c Release
-
-echo "[BUILD] Compiling shell IL..."
-dotnet build "${REPO_ROOT}/src/apps/shell/shell.csproj" -c Release
-
-echo "[BUILD] Compiling Microkernel.Posix IL..."
-dotnet build "${REPO_ROOT}/src/libs/Microkernel.Posix/Microkernel.Posix.csproj" -c Release
-
-echo "[BUILD] Compiling posix_runner IL..."
-dotnet build "${REPO_ROOT}/src/apps/posix_runner/posix_runner.csproj" -c Release
-
-echo "[BUILD] Compiling Kernel IL..."
-dotnet build "${REPO_ROOT}/src/kernel/Kernel.csproj" -c Release
+# Mirror AnyCPU vs x64 Release DLLs where ilc references expect canonical paths
+for pair in \
+    "src/common/Microkernel.Vfs:Microkernel.Vfs.dll" \
+    "src/runtime/Userland.PieLoader:Userland.PieLoader.dll" \
+    "src/servers/net.stack:net.stack.dll"
+do
+    dir="${pair%%:*}"
+    dll="${pair#*:}"
+    mkdir -p "${REPO_ROOT}/${dir}/bin/Release/${TFM}"
+    mkdir -p "${REPO_ROOT}/${dir}/bin/x64/Release/${TFM}"
+    if [ -f "${REPO_ROOT}/${dir}/bin/x64/Release/${TFM}/${dll}" ]; then
+        cp -f "${REPO_ROOT}/${dir}/bin/x64/Release/${TFM}/${dll}" "${REPO_ROOT}/${dir}/bin/Release/${TFM}/${dll}"
+    elif [ -f "${REPO_ROOT}/${dir}/bin/Release/${TFM}/${dll}" ]; then
+        cp -f "${REPO_ROOT}/${dir}/bin/Release/${TFM}/${dll}" "${REPO_ROOT}/${dir}/bin/x64/Release/${TFM}/${dll}"
+    fi
+done
+echo "[BUILD] Managed IL build completed in $((SECONDS - T_IL_START))s"
 
 echo "=== [1/6] Locating Native AOT Compiler (ilc) ==="
 
-# 1. Check if ILC is already set in environment and executable
-if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    # Search local NuGet package cache for .NET 10 ILCompiler first
-    ILC=$(find "$HOME/.nuget/packages" -path "*/runtime.*.microsoft.dotnet.ilcompiler/10.*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
-    if [ -z "$ILC" ]; then
-        ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
+case "$ARCH" in
+    x86_64|amd64) ILC_ARCH="x64" ;;
+    aarch64|arm64) ILC_ARCH="arm64" ;;
+    *) ILC_ARCH="x64" ;;
+esac
+case "$OS" in
+    mingw*|msys*|cygwin*) ILC_OS="win"; ILC_NAME="ilc.exe" ;;
+    darwin*) ILC_OS="osx"; ILC_NAME="ilc" ;;
+    *) ILC_OS="linux"; ILC_NAME="ilc" ;;
+esac
+
+find_ilc() {
+    local found=""
+    found=$(find "$HOME/.nuget/packages" -path "*/runtime.${ILC_OS}-${ILC_ARCH}.microsoft.dotnet.ilcompiler/10.*/tools/${ILC_NAME}" -type f 2>/dev/null | sort -V | tail -n 1 || true)
+    if [ -z "$found" ]; then
+        found=$(find "$HOME/.nuget/packages" -path "*/runtime.${ILC_OS}-*.microsoft.dotnet.ilcompiler/*/tools/${ILC_NAME}" -type f 2>/dev/null | sort -V | tail -n 1 || true)
     fi
+    if [ -n "$found" ] && [ ! -x "$found" ]; then
+        chmod +x "$found" 2>/dev/null || true
+    fi
+    printf '%s\n' "$found"
+}
+
+if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
+    ILC="$(find_ilc)"
 fi
 
-# 2. If not found, explicitly restore the compiler package into the NuGet cache
 if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    ARCH="$(uname -m)"
-    OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    case "$ARCH" in
-        x86_64) ILC_ARCH="x64" ;;
-        aarch64|arm64) ILC_ARCH="arm64" ;;
-        *) ILC_ARCH="x64" ;;
-    esac
-    ILC_PKG="runtime.${OS}-${ILC_ARCH}.Microsoft.DotNet.ILCompiler"
+    ILC_RID="${ILC_OS}-${ILC_ARCH}"
+    ILC_PKG="runtime.${ILC_RID}.Microsoft.DotNet.ILCompiler"
 
-    echo "[*] ilc not found in cache. Restoring ${ILC_PKG}..."
+    echo "[*] ${ILC_NAME} not found in cache. Restoring ${ILC_PKG}..."
     TMP_RESTORE="${TMP_DIR}/ilc_restore"
     mkdir -p "$TMP_RESTORE"
-    dotnet new console -o "$TMP_RESTORE" --no-restore >/dev/null 2>&1 || true
-    if ! dotnet add "$TMP_RESTORE" package "$ILC_PKG" --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1; then
-        echo "[-] Fallback: Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..." >&2
-        dotnet add "$TMP_RESTORE" package runtime.linux-x64.Microsoft.DotNet.ILCompiler --package-directory "$HOME/.nuget/packages" >/dev/null 2>&1 || true
+    TMP_RESTORE_HOST="$(host_path "$TMP_RESTORE")"
+    PKG_DIR_HOST="$(host_path "$HOME/.nuget/packages")"
+    dotnet new console -o "$TMP_RESTORE_HOST" --no-restore >/dev/null 2>&1 || true
+    NUGET_SRC_ARGS=(--source https://api.nuget.org/v3/index.json)
+    [ -f "${REPO_ROOT}/NuGet.Config" ] && NUGET_SRC_ARGS=(--configfile "$(host_path "${REPO_ROOT}/NuGet.Config")")
+    if dotnet add "$TMP_RESTORE_HOST" package Microsoft.DotNet.ILCompiler --version "10.0.*" --no-restore >/dev/null 2>&1; then
+        dotnet restore "$TMP_RESTORE_HOST" -r "$ILC_RID" "${NUGET_SRC_ARGS[@]}" --packages "$PKG_DIR_HOST" >/dev/null 2>&1 || true
+    fi
+    if [ -z "$(find_ilc)" ]; then
+        if ! dotnet add "$TMP_RESTORE_HOST" package "$ILC_PKG" "${NUGET_SRC_ARGS[@]}" --package-directory "$PKG_DIR_HOST" >/dev/null 2>&1; then
+            echo "[-] Fallback: Restoring runtime.linux-x64.Microsoft.DotNet.ILCompiler..." >&2
+            dotnet add "$TMP_RESTORE_HOST" package runtime.linux-x64.Microsoft.DotNet.ILCompiler "${NUGET_SRC_ARGS[@]}" --package-directory "$PKG_DIR_HOST" >/dev/null 2>&1 || true
+        fi
     fi
     rm -rf "$TMP_RESTORE"
-    ILC=$(find "$HOME/.nuget/packages" -path "*/runtime.*.microsoft.dotnet.ilcompiler/10.*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
-    if [ -z "$ILC" ]; then
-        ILC=$(find "$HOME/.nuget/packages" -path "*/tools/ilc" -type f -executable 2>/dev/null | sort -V | tail -n 1 || true)
-    fi
+    ILC="$(find_ilc)"
 fi
 
 if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    ILC=$(find "$HOME/.nuget/packages" -name "ilc" -type f 2>/dev/null | head -n 1 || true)
-    if [ -n "${ILC:-}" ]; then
-        chmod +x "$ILC" 2>/dev/null || true
-    fi
-fi
-
-if [ -z "${ILC:-}" ] || [ ! -x "${ILC:-}" ]; then
-    echo "[-] Error: Failed to locate executable 'ilc' Native AOT compiler binary." >&2
+    echo "[-] Error: Failed to locate executable '${ILC_NAME}' Native AOT compiler binary." >&2
     exit 1
 fi
 
@@ -167,497 +178,272 @@ export ILC
 ILC_BIN="$ILC"
 export ILC_BIN
 
-echo "[AOT] Compiling roottask via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
-    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall \
-    --directpinvoke:GetCs \
-    --directpinvoke:GetRsp \
-    --directpinvoke:CaptureCalleeSavedRegisters
+ref_dll_path() {
+    case "$1" in
+        MiniCoreLib)                printf '%s\n' "${REPO_HOST}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" ;;
+        Microkernel.Abstractions)   printf '%s\n' "${REPO_HOST}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" ;;
+        Userland.Runtime.ZeroAlloc) printf '%s\n' "${REPO_HOST}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" ;;
+        Userland.Runtime.Gc)        printf '%s\n' "${REPO_HOST}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" ;;
+        Microkernel.Vfs)            printf '%s\n' "${REPO_HOST}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" ;;
+        Userland.PieLoader)         printf '%s\n' "${REPO_HOST}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" ;;
+        Microkernel.Drawing)        printf '%s\n' "${REPO_HOST}/src/libs/Microkernel.Drawing/bin/x64/Release/${TFM}/Microkernel.Drawing.dll" ;;
+        Microkernel.Posix)          printf '%s\n' "${REPO_HOST}/src/libs/Microkernel.Posix/bin/x64/Release/${TFM}/Microkernel.Posix.dll" ;;
+        net.stack)                  printf '%s\n' "${REPO_HOST}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" ;;
+        *) echo "[-] Unknown reference key: $1" >&2; return 1 ;;
+    esac
+}
 
-echo "[NASM] Assembling RoottaskEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/roottask/RoottaskEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/RoottaskEntry.obj"
+build_userland_target() {
+    local name="$1"
+    local rel_dir="$2"
+    local asm_file="$3"
+    local entry_sym="$4"
+    local base_addr="$5"
+    local refs_csv="$6"
+    local pinvokes_csv="$7"
+    local extra_nasm="${8:-}"
 
-echo "[LINK] Linking roottask.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:RoottaskEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.exe" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/RoottaskEntry.obj" \
-    "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.obj"
+    local out_dir="${REPO_ROOT}/${rel_dir}/bin/x64/Release/${TFM}"
+    local out_dir_host
+    out_dir_host="$(host_path "$out_dir")"
+    local asm_obj_host="${out_dir_host}/${asm_file%.asm}.obj"
+    local asm_src_host
+    asm_src_host="$(host_path "${REPO_ROOT}/${rel_dir}/${asm_file}")"
 
-cp "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.exe" \
-   "${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin"
+    local ilc_args=(
+        "${out_dir_host}/${name}.dll"
+    )
+    local IFS=','
+    for r in $refs_csv; do
+        ilc_args+=(-r "$(ref_dll_path "$r")")
+    done
+    ilc_args+=(
+        -o "${out_dir_host}/${name}.obj"
+        --targetos windows
+        --targetarch x64
+        --systemmodule MiniCoreLib
+        --nativelib
+    )
+    for p in $pinvokes_csv; do
+        ilc_args+=("--directpinvoke:${p}")
+    done
+    unset IFS
 
-echo "[AOT] Compiling pci_server via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
+    echo "[AOT] Compiling ${name} via Native AOT (ilc)..."
+    "$ILC" "${ilc_args[@]}"
 
-echo "[NASM] Assembling PciServerEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/pci_server/PciServerEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/PciServerEntry.obj"
+    echo "[NASM] Assembling ${asm_file}..."
+    if [ -n "$extra_nasm" ]; then
+        nasm -f win64 "$extra_nasm" "$asm_src_host" -o "$asm_obj_host"
+    else
+        nasm -f win64 "$asm_src_host" -o "$asm_obj_host"
+    fi
 
-echo "[LINK] Linking pci_server.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:PciServerEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.exe" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/PciServerEntry.obj" \
-    "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.obj"
+    echo "[LINK] Linking ${name}.exe via lld-link..."
+    lld-link \
+        /align:4096 \
+        /filealign:4096 \
+        /nodefaultlib \
+        /subsystem:console \
+        /entry:"${entry_sym}" \
+        /base:"${base_addr}" \
+        /out:"${out_dir_host}/${name}.exe" \
+        "$asm_obj_host" \
+        "${out_dir_host}/${name}.obj"
 
-cp "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.exe" \
-   "${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.bin"
+    cp "${out_dir}/${name}.exe" "${out_dir}/${name}.bin"
+}
 
-echo "[AOT] Compiling display_server via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall \
-    --directpinvoke:Avx2Blit \
-    --directpinvoke:Avx2Fill
+build_kernel_target() {
+    local kern_bin="${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}"
+    local kern_bin_host
+    kern_bin_host="$(host_path "$kern_bin")"
+    local asm_dir="${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly"
+    local asm_dir_host
+    asm_dir_host="$(host_path "$asm_dir")"
 
-echo "[NASM] Assembling DisplayServerEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/display_server/DisplayServerEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/DisplayServerEntry.obj"
+    echo "[NASM] Assembling ApTrampoline.asm..."
+    nasm -f bin "${asm_dir_host}/ApTrampoline.asm" -o "${asm_dir_host}/ApTrampoline.bin"
 
-echo "[LINK] Linking display_server.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:DisplayServerEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.exe" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/DisplayServerEntry.obj" \
-    "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.obj"
+    echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
+    "$ILC" \
+        "${kern_bin_host}/Kernel.dll" \
+        -r "$(ref_dll_path MiniCoreLib)" \
+        -r "$(ref_dll_path Microkernel.Abstractions)" \
+        -o "${kern_bin_host}/Kernel.obj" \
+        --targetos windows \
+        --targetarch x64 \
+        --systemmodule MiniCoreLib \
+        --nativelib \
+        --directpinvoke:Out8 \
+        --directpinvoke:In8 \
+        --directpinvoke:Out16 \
+        --directpinvoke:In16 \
+        --directpinvoke:Out32 \
+        --directpinvoke:In32 \
+        --directpinvoke:IoWait \
+        --directpinvoke:ReadCr0 \
+        --directpinvoke:WriteCr0 \
+        --directpinvoke:ReadCr3 \
+        --directpinvoke:ReadCr2 \
+        --directpinvoke:WriteCr3 \
+        --directpinvoke:ReadCr4 \
+        --directpinvoke:WriteCr4 \
+        --directpinvoke:ReadMsr \
+        --directpinvoke:WriteMsr \
+        --directpinvoke:DisableInterrupts \
+        --directpinvoke:EnableInterrupts \
+        --directpinvoke:GetRsp \
+        --directpinvoke:GetRip \
+        --directpinvoke:SwitchToHigherHalf \
+        --directpinvoke:LoadGdt \
+        --directpinvoke:ReloadSegments \
+        --directpinvoke:LoadTss \
+        --directpinvoke:LoadIdt \
+        --directpinvoke:GetIsrThunkTable \
+        --directpinvoke:ContextSwitch \
+        --directpinvoke:DoSyscall \
+        --directpinvoke:GetSyscallEntry \
+        --directpinvoke:GetThreadStartTrampoline \
+        --directpinvoke:DropToUser \
+        --directpinvoke:EnterUserMode \
+        --directpinvoke:SetSyscallKernelRsp \
+        --directpinvoke:GetUserThreadTrampoline \
+        --directpinvoke:XSetBv \
+        --directpinvoke:Invlpg \
+        --directpinvoke:ReadRflags \
+        --directpinvoke:RestoreRflags \
+        --directpinvoke:CpuPause \
+        --directpinvoke:AtomicIncrement32 \
+        --directpinvoke:AtomicDecrement32 \
+        --directpinvoke:AtomicCompareExchange32 \
+        --directpinvoke:AtomicCompareExchange64 \
+        --directpinvoke:AtomicExchange32 \
+        --directpinvoke:AtomicFetchAndAdd32 \
+        --directpinvoke:GetCurrentCoreIndex \
+        --directpinvoke:GetCurrentThread \
+        --directpinvoke:SetCurrentThread \
+        --directpinvoke:GetApEntry64 \
+        --directpinvoke:SetApInitialStack \
+        --directpinvoke:GetApTrampolineBinary \
+        --directpinvoke:GetApTrampolineBinarySize \
+        --directpinvoke:GetKernelFontGlyphs
 
-cp "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.exe" \
-   "${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.bin"
+    echo "[NASM] Assembling Kernel assembly stubs..."
+    nasm -f win64 -i"${REPO_HOST}/" "${asm_dir_host}/Entry.asm" -o "${kern_bin_host}/Entry.obj"
+    for stub in DescriptorFlush IsrTrampolines ContextSwitch SyscallEntry UserTransition; do
+        nasm -f win64 "${asm_dir_host}/${stub}.asm" -o "${kern_bin_host}/${stub}.obj"
+    done
 
-echo "[AOT] Compiling supervisor via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
+    echo "[LINK] Linking BOOTX64.EFI via lld-link..."
+    lld-link \
+        /align:4096 \
+        /filealign:4096 \
+        /nodefaultlib \
+        /subsystem:efi_application \
+        /entry:EfiMain \
+        /out:"${REPO_HOST}/build/BOOTX64.EFI" \
+        "${kern_bin_host}/Kernel.obj" \
+        "${kern_bin_host}/Entry.obj" \
+        "${kern_bin_host}/DescriptorFlush.obj" \
+        "${kern_bin_host}/IsrTrampolines.obj" \
+        "${kern_bin_host}/ContextSwitch.obj" \
+        "${kern_bin_host}/SyscallEntry.obj" \
+        "${kern_bin_host}/UserTransition.obj"
+}
 
-echo "[NASM] Assembling SupervisorEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/supervisor/SupervisorEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/SupervisorEntry.obj"
+build_pie_c() {
+    local label="$1"
+    local src="$2"
+    local out="$3"
+    echo "[ELF] Compiling freestanding static PIE ${label}..."
+    gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "$(host_path "$out")" "$(host_path "${REPO_ROOT}/${src}")"
+}
 
-echo "[LINK] Linking supervisor.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:SupervisorEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.exe" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/SupervisorEntry.obj" \
-    "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.obj"
+JOB_LOGS_DIR="${TMP_DIR}/job_logs"
+mkdir -p "$JOB_LOGS_DIR"
+JOB_PIDS=()
+JOB_NAMES=()
+JOB_LOGS=()
 
-cp "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.exe" \
-   "${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin"
+MAX_JOBS="${SHARPMETAL_JOBS:-$(nproc 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")}"
+[ "$MAX_JOBS" -lt 1 ] && MAX_JOBS=1
 
-echo "[AOT] Compiling storage.nvme via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
+launch_job() {
+    local job_name="$1"
+    shift
+    while [ "$(jobs -rp | wc -l)" -ge "$MAX_JOBS" ]; do
+        wait -n 2>/dev/null || sleep 0.1
+    done
+    local log_file="${JOB_LOGS_DIR}/${job_name}.log"
+    (
+        set -euo pipefail
+        "$@"
+    ) >"$log_file" 2>&1 &
+    JOB_PIDS+=($!)
+    JOB_NAMES+=("$job_name")
+    JOB_LOGS+=("$log_file")
+}
 
-echo "[NASM] Assembling StorageNvmeEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/drivers/storage.nvme/StorageNvmeEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/StorageNvmeEntry.obj"
+wait_all_jobs() {
+    local failed=0
+    local i
+    for i in "${!JOB_PIDS[@]}"; do
+        if wait "${JOB_PIDS[$i]}"; then
+            cat "${JOB_LOGS[$i]}"
+        else
+            echo "[-] Job '${JOB_NAMES[$i]}' failed:" >&2
+            cat "${JOB_LOGS[$i]}" >&2
+            failed=1
+        fi
+    done
+    JOB_PIDS=()
+    JOB_NAMES=()
+    JOB_LOGS=()
+    [ "$failed" -eq 0 ] || exit 1
+}
 
-echo "[LINK] Linking storage.nvme.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:StorageNvmeEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.exe" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/StorageNvmeEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.obj"
+echo "=== [2/6] Compiling Native AOT, Kernel, and Static-PIE Targets (up to ${MAX_JOBS} parallel jobs) ==="
+T_AOT_START=$SECONDS
 
-cp "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.exe" \
-   "${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin"
+TMP_ELF="${TMP_DIR}/test.pie"
+TMP_HELLO_PIE="${TMP_DIR}/hello.pie"
+TMP_CAT_PIE="${TMP_DIR}/cat.pie"
 
-echo "[AOT] Compiling input.hid via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall \
-    --directpinvoke:PortIn8 \
-    --directpinvoke:PortOut8
+launch_job Kernel build_kernel_target
+launch_job roottask build_userland_target roottask src/servers/roottask RoottaskEntry.asm RoottaskEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc,Userland.Runtime.Gc,Microkernel.Vfs,Userland.PieLoader" \
+    "Syscall,GetCs,GetRsp,CaptureCalleeSavedRegisters"
+launch_job shell build_userland_target shell src/apps/shell ShellEntry.asm ShellEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc,Userland.Runtime.Gc,Microkernel.Drawing,Microkernel.Vfs,Userland.PieLoader" \
+    "Syscall,GetFontGlyphs" "-i${REPO_HOST}/"
+launch_job posix_runner build_userland_target posix_runner src/apps/posix_runner Crt0.asm PosixRunnerEntry 0x20000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc,Userland.Runtime.Gc,Microkernel.Vfs,Userland.PieLoader,Microkernel.Posix" \
+    "Syscall"
+launch_job pci_server build_userland_target pci_server src/servers/pci_server PciServerEntry.asm PciServerEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall"
+launch_job display_server build_userland_target display_server src/servers/display_server DisplayServerEntry.asm DisplayServerEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall,Avx2Blit,Avx2Fill"
+launch_job supervisor build_userland_target supervisor src/servers/supervisor SupervisorEntry.asm SupervisorEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall"
+launch_job storage.nvme build_userland_target storage.nvme src/servers/drivers/storage.nvme StorageNvmeEntry.asm StorageNvmeEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall"
+launch_job input.hid build_userland_target input.hid src/servers/drivers/input.hid InputHidEntry.asm InputHidEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall,PortIn8,PortOut8"
+launch_job bus.xhci build_userland_target bus.xhci src/servers/drivers/bus.xhci XhciEntry.asm XhciEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall,Mfence"
+launch_job net.virtio build_userland_target net.virtio src/servers/drivers/net.virtio VirtioNetEntry.asm VirtioNetEntry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc,net.stack" "Syscall"
+launch_job fs.fat32 build_userland_target fs.fat32 src/servers/fs.fat32 Fat32Entry.asm Fat32Entry 0x40000000 \
+    "MiniCoreLib,Microkernel.Abstractions,Userland.Runtime.ZeroAlloc" "Syscall"
+launch_job pie_elftest build_pie_c "ElfTest.c" "src/apps/frontier_tests/ElfTest.c" "$TMP_ELF"
+launch_job pie_hello build_pie_c "hello_world.c" "src/apps/frontier_tests/hello_world.c" "$TMP_HELLO_PIE"
+launch_job pie_cat build_pie_c "cat.c" "src/apps/frontier_tests/cat.c" "$TMP_CAT_PIE"
 
-echo "[NASM] Assembling InputHidEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/drivers/input.hid/InputHidEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/InputHidEntry.obj"
+wait_all_jobs
+echo "[AOT] Native AOT, Kernel, NASM, Link, and PIE builds completed in $((SECONDS - T_AOT_START))s"
 
-echo "[LINK] Linking input.hid.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:InputHidEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.exe" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/InputHidEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.obj"
-
-cp "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.exe" \
-   "${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin"
-
-echo "[AOT] Compiling bus.xhci via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall \
-    --directpinvoke:Mfence
-
-echo "[NASM] Assembling XhciEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/drivers/bus.xhci/XhciEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/XhciEntry.obj"
-
-echo "[LINK] Linking bus.xhci.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:XhciEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.exe" \
-    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/XhciEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.obj"
-
-cp "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.exe" \
-   "${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.bin"
-
-echo "[AOT] Compiling net.virtio via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/servers/net.stack/bin/x64/Release/${TFM}/net.stack.dll" \
-    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
-
-echo "[NASM] Assembling VirtioNetEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/drivers/net.virtio/VirtioNetEntry.asm" \
-    -o "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/VirtioNetEntry.obj"
-
-echo "[LINK] Linking net.virtio.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:VirtioNetEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.exe" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/VirtioNetEntry.obj" \
-    "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.obj"
-
-cp "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.exe" \
-   "${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin"
-
-echo "[AOT] Compiling fs.fat32 via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
-
-echo "[NASM] Assembling Fat32Entry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/servers/fs.fat32/Fat32Entry.asm" \
-    -o "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/Fat32Entry.obj"
-
-echo "[LINK] Linking fs.fat32.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:Fat32Entry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/Fat32Entry.obj" \
-    "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.obj"
-
-cp "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.exe" \
-   "${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin"
-
-echo "[BUILD] Userland.PieLoader (pre-shell AOT guard)..."
-dotnet build "${REPO_ROOT}/src/runtime/Userland.PieLoader/Userland.PieLoader.csproj" -c Release --nologo -v q
-# Canonicalize: bare `dotnet build` emits bin/Release/<TFM>/, while x64-platform
-# builds emit bin/x64/Release/<TFM>/. Shell ilc -r below uses the flat path,
-# so mirror the fresh x64 DLL there to avoid stale/missing reference warnings.
-mkdir -p "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}"
-cp -f "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
-      "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" 2>/dev/null || true
-
-echo "[AOT] Compiling shell via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
-    -r "${REPO_ROOT}/src/libs/Microkernel.Drawing/bin/x64/Release/${TFM}/Microkernel.Drawing.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/Release/${TFM}/Userland.PieLoader.dll" \
-    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall \
-    --directpinvoke:GetFontGlyphs
-
-echo "[NASM] Assembling ShellEntry.asm..."
-nasm -f win64 -i"${REPO_ROOT}/" "${REPO_ROOT}/src/apps/shell/ShellEntry.asm" \
-    -o "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/ShellEntry.obj"
-
-echo "[LINK] Linking shell.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:ShellEntry \
-    /base:0x40000000 \
-    /out:"${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.exe" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/ShellEntry.obj" \
-    "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.obj"
-
-cp "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.exe" \
-   "${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin"
-
-echo "[AOT] Compiling posix_runner via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.ZeroAlloc/bin/x64/Release/${TFM}/Userland.Runtime.ZeroAlloc.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.Runtime.Gc/bin/x64/Release/${TFM}/Userland.Runtime.Gc.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Vfs/bin/Release/${TFM}/Microkernel.Vfs.dll" \
-    -r "${REPO_ROOT}/src/runtime/Userland.PieLoader/bin/x64/Release/${TFM}/Userland.PieLoader.dll" \
-    -r "${REPO_ROOT}/src/libs/Microkernel.Posix/bin/x64/Release/${TFM}/Microkernel.Posix.dll" \
-    -o "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Syscall
-
-echo "[NASM] Assembling posix_runner Crt0.asm..."
-nasm -f win64 "${REPO_ROOT}/src/apps/posix_runner/Crt0.asm" \
-    -o "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/Crt0.obj"
-
-echo "[LINK] Linking posix_runner.exe via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:console \
-    /entry:PosixRunnerEntry \
-    /base:0x20000000 \
-    /out:"${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.exe" \
-    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/Crt0.obj" \
-    "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.obj"
-
-cp "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.exe" \
-   "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
-
-echo "[AOT] Compiling Kernel via Native AOT (ilc)..."
-"$ILC" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.dll" \
-    -r "${REPO_ROOT}/src/common/MiniCoreLib/bin/Release/${TFM}/MiniCoreLib.dll" \
-    -r "${REPO_ROOT}/src/common/Microkernel.Abstractions/bin/x64/Release/${TFM}/Microkernel.Abstractions.dll" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.obj" \
-    --targetos windows \
-    --targetarch x64 \
-    --systemmodule MiniCoreLib \
-    --nativelib \
-    --directpinvoke:Out8 \
-    --directpinvoke:In8 \
-    --directpinvoke:Out16 \
-    --directpinvoke:In16 \
-    --directpinvoke:Out32 \
-    --directpinvoke:In32 \
-    --directpinvoke:IoWait \
-    --directpinvoke:ReadCr0 \
-    --directpinvoke:WriteCr0 \
-    --directpinvoke:ReadCr3 \
-    --directpinvoke:ReadCr2 \
-    --directpinvoke:WriteCr3 \
-    --directpinvoke:ReadCr4 \
-    --directpinvoke:WriteCr4 \
-    --directpinvoke:ReadMsr \
-    --directpinvoke:WriteMsr \
-    --directpinvoke:DisableInterrupts \
-    --directpinvoke:EnableInterrupts \
-    --directpinvoke:GetRsp \
-    --directpinvoke:GetRip \
-    --directpinvoke:SwitchToHigherHalf \
-    --directpinvoke:LoadGdt \
-    --directpinvoke:ReloadSegments \
-    --directpinvoke:LoadTss \
-    --directpinvoke:LoadIdt \
-    --directpinvoke:GetIsrThunkTable \
-    --directpinvoke:ContextSwitch \
-    --directpinvoke:DoSyscall \
-    --directpinvoke:GetSyscallEntry \
-    --directpinvoke:GetThreadStartTrampoline \
-    --directpinvoke:DropToUser \
-    --directpinvoke:EnterUserMode \
-    --directpinvoke:SetSyscallKernelRsp \
-    --directpinvoke:GetUserThreadTrampoline \
-    --directpinvoke:XSetBv \
-    --directpinvoke:Invlpg \
-    --directpinvoke:ReadRflags \
-    --directpinvoke:RestoreRflags \
-    --directpinvoke:CpuPause \
-    --directpinvoke:AtomicIncrement32 \
-    --directpinvoke:AtomicDecrement32 \
-    --directpinvoke:AtomicCompareExchange32 \
-    --directpinvoke:AtomicCompareExchange64 \
-    --directpinvoke:AtomicExchange32 \
-    --directpinvoke:AtomicFetchAndAdd32 \
-    --directpinvoke:GetCurrentCoreIndex \
-    --directpinvoke:GetCurrentThread \
-    --directpinvoke:SetCurrentThread \
-    --directpinvoke:GetApEntry64 \
-    --directpinvoke:SetApInitialStack \
-    --directpinvoke:GetApTrampolineBinary \
-    --directpinvoke:GetApTrampolineBinarySize \
-    --directpinvoke:GetKernelFontGlyphs
-
-echo "[NASM] Assembling ApTrampoline.asm..."
-nasm -f bin "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.asm" \
-    -o "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ApTrampoline.bin"
-
-echo "[NASM] Assembling Entry.asm..."
-nasm -f win64 -i"${REPO_ROOT}/" "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/Entry.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Entry.obj"
-
-echo "[NASM] Assembling DescriptorFlush.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/DescriptorFlush.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/DescriptorFlush.obj"
-
-echo "[NASM] Assembling IsrTrampolines.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/IsrTrampolines.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/IsrTrampolines.obj"
-
-echo "[NASM] Assembling ContextSwitch.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/ContextSwitch.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/ContextSwitch.obj"
-
-echo "[NASM] Assembling SyscallEntry.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/SyscallEntry.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/SyscallEntry.obj"
-
-echo "[NASM] Assembling UserTransition.asm..."
-nasm -f win64 "${REPO_ROOT}/src/kernel/Arch/x86_64/Assembly/UserTransition.asm" \
-    -o "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/UserTransition.obj"
-
-echo "[LINK] Linking BOOTX64.EFI via lld-link..."
-lld-link \
-    /align:4096 \
-    /filealign:4096 \
-    /nodefaultlib \
-    /subsystem:efi_application \
-    /entry:EfiMain \
-    /out:"${REPO_ROOT}/build/BOOTX64.EFI" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Kernel.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/Entry.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/DescriptorFlush.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/IsrTrampolines.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/ContextSwitch.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/SyscallEntry.obj" \
-    "${REPO_ROOT}/src/kernel/bin/x64/Release/${TFM}/UserTransition.obj"
-
-echo "[STAGE] Staging EFI System Partition directory..."
+echo "=== [3/6] Staging ESP Directory and Packing INITRD.IMG ==="
 ESP_DIR="${REPO_ROOT}/build/esp"
 mkdir -p "${ESP_DIR}/EFI/BOOT"
 cp "${REPO_ROOT}/build/BOOTX64.EFI" "${ESP_DIR}/EFI/BOOT/BOOTX64.EFI"
@@ -670,107 +456,93 @@ echo "[PACK] Packaging initial ramdisk (INITRD.IMG)..."
 XHCI_FLAG_ARGS=()
 if [ "${XHCI_NATIVE:-1}" = "1" ]; then
     : > "${REPO_ROOT}/build/xhci_native.flag"
-    XHCI_FLAG_ARGS+=("xhci_native.flag=${REPO_ROOT}/build/xhci_native.flag")
+    XHCI_FLAG_ARGS+=("xhci_native.flag=${REPO_HOST}/build/xhci_native.flag")
     echo "[BUILD] xhci_native.flag staged into INITRD"
 else
     rm -f "${REPO_ROOT}/build/xhci_native.flag"
     echo "[PACK] Native xHCI opt-in disabled: not packing xhci_native.flag"
 fi
-python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" \
-    "${ESP_DIR}/EFI/BOOT/INITRD.IMG" \
-    roottask="${REPO_ROOT}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin" \
-    pci_server.bin="${REPO_ROOT}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.bin" \
-    display_server.bin="${REPO_ROOT}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.bin" \
-    supervisor.bin="${REPO_ROOT}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin" \
-    storage.nvme.bin="${REPO_ROOT}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin" \
-    input.hid.bin="${REPO_ROOT}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin" \
-    bus.xhci.bin="${REPO_ROOT}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.bin" \
+python3 "${REPO_HOST}/build/scripts/Pack-Initrd.py" \
+    "${REPO_HOST}/build/esp/EFI/BOOT/INITRD.IMG" \
+    roottask="${REPO_HOST}/src/servers/roottask/bin/x64/Release/${TFM}/roottask.bin" \
+    pci_server.bin="${REPO_HOST}/src/servers/pci_server/bin/x64/Release/${TFM}/pci_server.bin" \
+    display_server.bin="${REPO_HOST}/src/servers/display_server/bin/x64/Release/${TFM}/display_server.bin" \
+    supervisor.bin="${REPO_HOST}/src/servers/supervisor/bin/x64/Release/${TFM}/supervisor.bin" \
+    storage.nvme.bin="${REPO_HOST}/src/servers/drivers/storage.nvme/bin/x64/Release/${TFM}/storage.nvme.bin" \
+    input.hid.bin="${REPO_HOST}/src/servers/drivers/input.hid/bin/x64/Release/${TFM}/input.hid.bin" \
+    bus.xhci.bin="${REPO_HOST}/src/servers/drivers/bus.xhci/bin/x64/Release/${TFM}/bus.xhci.bin" \
     ${XHCI_FLAG_ARGS[@]+"${XHCI_FLAG_ARGS[@]}"} \
-    net.virtio.bin="${REPO_ROOT}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin" \
-    fs.fat32.bin="${REPO_ROOT}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin" \
-    shell.bin="${REPO_ROOT}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin" \
-    posix_runner.bin="${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
+    net.virtio.bin="${REPO_HOST}/src/servers/drivers/net.virtio/bin/x64/Release/${TFM}/net.virtio.bin" \
+    fs.fat32.bin="${REPO_HOST}/src/servers/fs.fat32/bin/x64/Release/${TFM}/fs.fat32.bin" \
+    shell.bin="${REPO_HOST}/src/apps/shell/bin/x64/Release/${TFM}/shell.bin" \
+    posix_runner.bin="${REPO_HOST}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin"
 
 if [ "${XHCI_NATIVE:-1}" = "1" ]; then
-    python3 "${REPO_ROOT}/build/scripts/Pack-Initrd.py" --verify "${ESP_DIR}/EFI/BOOT/INITRD.IMG" "xhci_native.flag"
+    python3 "${REPO_HOST}/build/scripts/Pack-Initrd.py" --verify "${REPO_HOST}/build/esp/EFI/BOOT/INITRD.IMG" "xhci_native.flag"
 fi
 
-# Constraint 1: Rootless FAT32 Disk Staging
-NVME_IMG="${REPO_ROOT}/build/nvme.img"
-echo "[DISK] Creating 64MB rootless FAT32 NVMe disk image at ${NVME_IMG}..."
-rm -f "${NVME_IMG}"
-dd if=/dev/zero of="${NVME_IMG}" bs=1M count=64 status=none
-mkfs.fat -F 32 -s 1 "${NVME_IMG}"
+echo "=== [4/6] Staging FAT32 NVMe and GPT EFI Disk Images in Parallel ==="
+T_DISK_START=$SECONDS
 TMP_HELLO="${TMP_DIR}/HELLO.TXT"
 printf "SharpMetal BareMetal OS" > "${TMP_HELLO}"
-mcopy -i "${NVME_IMG}" "${TMP_HELLO}" ::/HELLO.TXT
 
-echo "[ELF] Compiling freestanding static PIE ElfTest.c..."
-TMP_ELF="${TMP_DIR}/test.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_ELF}" "${REPO_ROOT}/src/apps/frontier_tests/ElfTest.c"
-mmd -i "${NVME_IMG}" ::/bin || true
-mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/test.pie
-mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/bin/elftest.pie
-mcopy -i "${NVME_IMG}" "${TMP_ELF}" ::/test.pie
+stage_pie_binaries() {
+    local target="$1"
+    mmd -i "$target" ::/bin || true
+    mcopy -i "$target" "${TMP_ELF}" ::/bin/test.pie
+    mcopy -i "$target" "${TMP_ELF}" ::/bin/elftest.pie
+    mcopy -i "$target" "${TMP_ELF}" ::/test.pie
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/bin/hello.pie
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/bin/posix.pie
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/bin/posix_test
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/hello.pie
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/posix.pie
+    mcopy -i "$target" "${TMP_HELLO_PIE}" ::/posix_test
+    mcopy -i "$target" "${TMP_CAT_PIE}" ::/bin/cat.pie
+    mcopy -i "$target" "${TMP_CAT_PIE}" ::/cat.pie
+    mcopy -i "$target" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/bin/posix_runner || true
+    mcopy -i "$target" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/posix_runner.bin || true
+}
 
-echo "[POSIX] Compiling freestanding static PIE hello_world.c..."
-TMP_HELLO_PIE="${TMP_DIR}/hello.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_HELLO_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/hello_world.c"
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/hello.pie
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix.pie
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/bin/posix_test
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/hello.pie
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/posix.pie
-mcopy -i "${NVME_IMG}" "${TMP_HELLO_PIE}" ::/posix_test
+build_nvme_image() {
+    local nvme_img="${REPO_ROOT}/build/nvme.img"
+    echo "[DISK] Creating 64MB rootless FAT32 NVMe disk image at ${nvme_img}..."
+    rm -f "${nvme_img}"
+    dd if=/dev/zero of="${nvme_img}" bs=1M count=64 status=none
+    mkfs.fat -F 32 -s 1 "${nvme_img}"
+    mcopy -i "${nvme_img}" "${TMP_HELLO}" ::/HELLO.TXT
+    stage_pie_binaries "${nvme_img}"
+}
 
-echo "[POSIX] Compiling freestanding static PIE cat.c..."
-TMP_CAT_PIE="${TMP_DIR}/cat.pie"
-gcc -fPIE -pie -nostdlib -Wl,--no-dynamic-linker -Wl,-e,_start -Wl,-z,noseparate-code -o "${TMP_CAT_PIE}" "${REPO_ROOT}/src/apps/frontier_tests/cat.c"
-mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/bin/cat.pie
-mcopy -i "${NVME_IMG}" "${TMP_CAT_PIE}" ::/cat.pie
+build_gpt_disk_image() {
+    local disk_img="${REPO_ROOT}/build/disk.img"
+    echo "[DISK] Creating 64MB GPT disk image with FAT32 ESP..."
+    rm -f "${disk_img}"
+    dd if=/dev/zero of="${disk_img}" bs=1M count=64 status=none
 
-mcopy -i "${NVME_IMG}" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/bin/posix_runner || true
-mcopy -i "${NVME_IMG}" "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/posix_runner.bin || true
+    local part_start_sectors=2048
+    local part_end_sectors=131038
+    local part_sectors=$((part_end_sectors - part_start_sectors + 1))
+    local part_start_bytes=$((part_start_sectors * 512))
 
-# Build raw GPT disk image with FAT32 ESP
-DISK_IMG="${REPO_ROOT}/build/disk.img"
-echo "[DISK] Creating 64MB GPT disk image with FAT32 ESP..."
-rm -f "${DISK_IMG}"
-dd if=/dev/zero of="${DISK_IMG}" bs=1M count=64 status=none
+    parted -s "${disk_img}" mklabel gpt
+    parted -s "${disk_img}" mkpart ESP fat32 "${part_start_sectors}s" "${part_end_sectors}s"
+    parted -s "${disk_img}" set 1 esp on
 
-PART_START_SECTORS=2048
-PART_END_SECTORS=131038
-PART_SECTORS=$((PART_END_SECTORS - PART_START_SECTORS + 1))
-PART_START_BYTES=$((PART_START_SECTORS * 512))
+    mformat -i "${disk_img}"@@${part_start_bytes} -T "${part_sectors}" -F -v "EFI_SYSTEM"
+    mmd -i "${disk_img}"@@${part_start_bytes} ::EFI
+    mmd -i "${disk_img}"@@${part_start_bytes} ::EFI/BOOT
+    mcopy -i "${disk_img}"@@${part_start_bytes} "${REPO_ROOT}/build/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
+    mcopy -i "${disk_img}"@@${part_start_bytes} "${ESP_DIR}/EFI/BOOT/INITRD.IMG" ::EFI/BOOT/INITRD.IMG
+    mcopy -i "${disk_img}"@@${part_start_bytes} "${ESP_DIR}/startup.nsh" ::startup.nsh
+    mcopy -i "${disk_img}"@@${part_start_bytes} "${TMP_HELLO}" ::/HELLO.TXT
+    stage_pie_binaries "${disk_img}"@@${part_start_bytes}
+    echo "[DISK] Disk image created successfully at ${disk_img}"
+}
 
-parted -s "${DISK_IMG}" mklabel gpt
-parted -s "${DISK_IMG}" mkpart ESP fat32 "${PART_START_SECTORS}s" "${PART_END_SECTORS}s"
-parted -s "${DISK_IMG}" set 1 esp on
+launch_job nvme_img build_nvme_image
+launch_job gpt_disk_img build_gpt_disk_image
+wait_all_jobs
+echo "[DISK] Disk image staging completed in $((SECONDS - T_DISK_START))s"
 
-# Format partition using mformat with exact sector count to protect secondary GPT
-mformat -i "${DISK_IMG}"@@${PART_START_BYTES} -T "${PART_SECTORS}" -F -v "EFI_SYSTEM"
-mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::EFI
-mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::EFI/BOOT
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/build/BOOTX64.EFI" ::EFI/BOOT/BOOTX64.EFI
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/EFI/BOOT/INITRD.IMG" ::EFI/BOOT/INITRD.IMG
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${ESP_DIR}/startup.nsh" ::startup.nsh
-
-# Stage sample assets and userland test binaries in the FAT32 ESP partition
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO}" ::/HELLO.TXT
-mmd -i "${DISK_IMG}"@@${PART_START_BYTES} ::/bin || true
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/bin/test.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/bin/elftest.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_ELF}" ::/test.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/hello.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/posix.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/bin/posix_test
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/hello.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/posix.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_HELLO_PIE}" ::/posix_test
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_CAT_PIE}" ::/bin/cat.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${TMP_CAT_PIE}" ::/cat.pie
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/bin/posix_runner || true
-mcopy -i "${DISK_IMG}"@@${PART_START_BYTES} "${REPO_ROOT}/src/apps/posix_runner/bin/x64/Release/${TFM}/posix_runner.bin" ::/posix_runner.bin || true
-echo "[DISK] Disk image created successfully at ${DISK_IMG}"
-
-echo "[SUCCESS] Make-DiskImage completed successfully."
+echo "[SUCCESS] Make-DiskImage completed successfully in $((SECONDS - BUILD_START_SECS))s."
